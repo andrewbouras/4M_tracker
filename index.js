@@ -637,7 +637,8 @@ async function enableRsiIndicator(page, tokenAddress) {
     }
     
     // Updated RSI selector to match the exact structure
-    let rsiValue = await tradingViewFrame.evaluate(() => {
+    let rsiData = await tradingViewFrame.evaluate(() => {
+      let rsiValue = null;
       // First and most specific approach: Look for RSI with exact structure from real DOM
       // This targets the specific HTML structure with "RSI" title and "14 SMA 14" description
       const rsiItems = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
@@ -647,81 +648,146 @@ async function enableRsiIndicator(page, tokenAddress) {
         const descEl = item.querySelector('.title-l31H9iuA.descTitle-l31H9iuA[data-name="legend-source-title"]');
         
         if (titleEl && titleEl.textContent === 'RSI' && 
-            descEl && descEl.textContent.includes('SMA')) {
+            descEl && (descEl.textContent.includes('SMA') || descEl.textContent.includes('14'))) { // More flexible check for description
           // Found the RSI item, now get the value
-          const valueEl = item.querySelector('.valueValue-l31H9iuA.apply-common-tooltip[title="Plot"]');
-          if (valueEl) {
-            // Get the computed style to verify it's the purple RSI value
-            const style = window.getComputedStyle(valueEl);
-            const color = style.color;
-            const isRsiPurple = color.includes('126, 87, 194') || // RGB format
-                               color.includes('#7e57c2') ||       // Hex format
-                               color.toLowerCase().includes('purple') || // Name
-                               color.includes('rgb(126, 87, 194)');
-            
-            const text = valueEl.textContent.trim();
-            if (text && !isNaN(parseFloat(text))) {
-              console.log(`Found EXACT RSI value from specific structure: ${text} (color: ${color}, isPurple: ${isRsiPurple})`);
-              return text;
+          // OLD: const valueEl = item.querySelector('.valueValue-l31H9iuA.apply-common-tooltip[title="Plot"]');
+          // NEW: Look within the values wrapper, targeting the specific structure
+          const valueWrapper = item.querySelector('.valuesWrapper-l31H9iuA');
+          if (valueWrapper) {
+            const valueEl = valueWrapper.querySelector('.valueItem-l31H9iuA .valueValue-l31H9iuA.apply-common-tooltip');
+            if (valueEl) {
+              // Get the computed style to verify it's the purple RSI value
+              const style = window.getComputedStyle(valueEl);
+              const color = style.color;
+              const isRsiPurple = color.includes('126, 87, 194') || // RGB format
+                                 color.includes('#7e57c2') ||       // Hex format
+                                 color.toLowerCase().includes('purple') || // Name
+                                 color.includes('rgb(126, 87, 194)');
+              
+              const text = valueEl.textContent.trim();
+              if (text && !isNaN(parseFloat(text))) {
+                console.log(`Found EXACT RSI value from specific structure: ${text} (color: ${color}, isPurple: ${isRsiPurple})`);
+                rsiValue = text;
+                break;
+              }
             }
           }
         }
       }
       
-      // Second approach: Try to find RSI indicator with simpler selectors
-      const rsiSection = document.querySelector('div[data-name="legend-source-item"] div[data-name="legend-source-title"]:first-child');
-      if (rsiSection && rsiSection.textContent === 'RSI') {
-        // Check if we also have "14 SMA 14" in a sibling element
-        const parentDiv = rsiSection.closest('div[data-name="legend-source-item"]');
-        const descTitle = parentDiv?.querySelector('div[data-name="legend-source-title"]:nth-child(2)');
-        
-        if (descTitle && descTitle.textContent.includes('SMA')) {
-          // We found the RSI with SMA - look for the value
-          const valueItem = parentDiv?.querySelector('.valueValue-l31H9iuA.apply-common-tooltip[title="Plot"]');
-          if (valueItem) {
-            const text = valueItem.textContent.trim();
-            if (text && !isNaN(parseFloat(text))) {
-              console.log(`Found RSI value from simplified structure: ${text}`);
-              return text;
+      if (rsiValue === null) {
+        // Second approach: Try to find RSI indicator with simpler selectors
+        const rsiSection = document.querySelector('div[data-name="legend-source-item"] div[data-name="legend-source-title"]:first-child');
+        if (rsiSection && rsiSection.textContent === 'RSI') {
+          // Check if we also have "14 SMA 14" in a sibling element
+          const parentDiv = rsiSection.closest('div[data-name="legend-source-item"]');
+          const descTitle = parentDiv?.querySelector('div[data-name="legend-source-title"]:nth-child(2)');
+          
+          if (descTitle && (descTitle.textContent.includes('SMA') || descTitle.textContent.includes('14'))) { // NEW: Path to value via wrappers
+            // We found the RSI with SMA - look for the value
+            // OLD: const valueItem = parentDiv?.querySelector('.valueValue-l31H9iuA.apply-common-tooltip[title="Plot"]');
+            // NEW:
+            const valueWrapper = parentDiv?.querySelector('.valuesWrapper-l31H9iuA');
+            if (valueWrapper) {
+              const valueItem = valueWrapper.querySelector('.valueItem-l31H9iuA .valueValue-l31H9iuA.apply-common-tooltip');
+              if (valueItem) {
+                const text = valueItem.textContent.trim();
+                if (text && !isNaN(parseFloat(text))) {
+                  console.log(`Found RSI value from simplified structure: ${text}`);
+                  rsiValue = text;
+                }
+              }
             }
           }
         }
       }
       
-      // Last resort approach: Try to find any RSI values
-      // Only accept values in the valid RSI range (0-100) that are specifically in an element with title="Plot"
-      const plotElements = document.querySelectorAll('.valueValue-l31H9iuA.apply-common-tooltip[title="Plot"]');
-      for (const el of plotElements) {
-        // Check if this element might be part of an RSI container
-        const container = el.closest('.item-l31H9iuA');
-        if (container && container.textContent.includes('RSI')) {
-          const text = el.textContent.trim();
-        if (text && !isNaN(parseFloat(text))) {
-          const value = parseFloat(text);
-          if (value >= 0 && value <= 100) {
-              console.log(`Found potential RSI value from title="Plot": ${text}`);
-              return text;
+      if (rsiValue === null) {
+        // Last resort approach: Try to find any RSI values
+        // Only accept values in the valid RSI range (0-100) that are specifically in an element with title="Plot"
+        // This last resort might be less reliable now without title="Plot" but kept for broader search if primary methods fail.
+        // We will rely more on the structure and color now for this.
+        const plotElements = document.querySelectorAll('.valueValue-l31H9iuA.apply-common-tooltip');
+        for (const el of plotElements) {
+          // Check if this element might be part of an RSI container
+          const container = el.closest('.item-l31H9iuA');
+          if (container && container.textContent.includes('RSI')) {
+            const text = el.textContent.trim();
+          if (text && !isNaN(parseFloat(text))) {
+            const valueNum = parseFloat(text);
+            if (valueNum >= 0 && valueNum <= 100) {
+                console.log(`Found potential RSI value from title="Plot": ${text}`);
+                rsiValue = text;
+                break;
+              }
             }
           }
         }
       }
       
-      console.log('No valid RSI found with any method');
-      return null;
+      if (rsiValue === null) {
+        let debugText = 'RSI debug (enableRsiIndicator): ';
+        const rsiStudyItems = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
+        if (rsiStudyItems.length > 0) {
+          debugText += `Found ${rsiStudyItems.length} .study-l31H9iuA items. First outerHTML (200chars): ${rsiStudyItems[0].outerHTML.substring(0,200)}. `;
+        } else {
+          debugText += 'No .study-l31H9iuA items found. ';
+        }
+        const legendSourceItems = document.querySelectorAll('div[data-name="legend-source-item"]');
+        if (legendSourceItems.length > 0) {
+           debugText += `Found ${legendSourceItems.length} legend-source-item. First outerHTML (200chars): ${legendSourceItems[0].outerHTML.substring(0,200)}. `;
+        } else {
+          debugText += 'No legend-source-item found. ';
+        }
+        const plotValueElements = document.querySelectorAll('.valueValue-l31H9iuA.apply-common-tooltip');
+         debugText += `Found ${plotValueElements.length} plot elements.`;
+
+        console.log(debugText + 'No valid RSI found with any method inside evaluate.');
+        return { value: null, debugText: debugText };
+      }
+      return { value: rsiValue, debugText: `RSI found in evaluate: ${rsiValue}` };
     });
     
+    let rsiValue = rsiData.value;
+    if (rsiValue === null) {
+        console.log(`${tokenAddress}: RSI not found in TradingView frame (enableRsiIndicator). Debug: ${rsiData.debugText}`);
+    }
+    
     // Updated market cap selector to match the exact structure
-    let marketCapValue = await tradingViewFrame.evaluate(() => {
+    let mcData = await tradingViewFrame.evaluate(() => {
+      let marketCapValue = null;
       const mcElements = document.querySelectorAll('.valueItem-l31H9iuA');
       for (const item of mcElements) {
         const title = item.querySelector('.valueTitle-l31H9iuA');
         if (title && title.textContent === 'C') {
           const value = item.querySelector('.valueValue-l31H9iuA');
-          return value ? value.textContent.trim() : null;
+          marketCapValue = value ? value.textContent.trim() : null;
+          break;
         }
       }
-      return null;
+
+      if (marketCapValue === null) {
+        let debugText = 'MC debug (enableRsiIndicator): ';
+        const valueItems = document.querySelectorAll('.valueItem-l31H9iuA');
+        if (valueItems.length > 0) {
+          debugText += `Found ${valueItems.length} .valueItem-l31H9iuA items. Titles: `;
+          valueItems.forEach(item => {
+            const titleEl = item.querySelector('.valueTitle-l31H9iuA');
+            if (titleEl) debugText += `"${titleEl.textContent}" `;
+          });
+        } else {
+          debugText += 'No .valueItem-l31H9iuA items found. ';
+        }
+        console.log(debugText + 'No MC found with "C" title inside evaluate.');
+        return { value: null, debugText: debugText };
+      }
+      return { value: marketCapValue, debugText: `MC found in evaluate: ${marketCapValue}` };
     });
+    
+    let marketCapValue = mcData.value;
+    if (marketCapValue === null) {
+        console.log(`${tokenAddress}: MC not found in TradingView frame (enableRsiIndicator). Debug: ${mcData.debugText}`);
+    }
     
     // Log the values we found
     if (rsiValue || marketCapValue) {
@@ -1206,7 +1272,6 @@ async function enableRsiIndicator(page, tokenAddress) {
 // Updated monitorTokenRSI function to track status more accurately
 async function monitorTokenRSI(page, tokenAddress) {
   // State tracking
-  let lowMcStartTime = null;
   let isRsiBelow25 = false;
   let hasSentBuyRequest = false;
   let noRsiDataCount = 0;
@@ -1221,6 +1286,10 @@ async function monitorTokenRSI(page, tokenAddress) {
   
   // Track invalid RSI values
   let consecutiveInvalidRsiCount = 0;
+  
+  // Track Market Cap for staleness
+  let lastMarketCapValueString = null; // Store the string representation of MC
+  let lastMarketCapChangeTime = null;   // Timestamp of the last MC change
   
   // Function to blacklist current token and move to next one
   const blacklistCurrentToken = async (reason) => {
@@ -1246,66 +1315,124 @@ async function monitorTokenRSI(page, tokenAddress) {
       
       if (tradingViewFrame) {
         try {
-          // Get RSI value (abbreviated for brevity, full logic in original)
-          rsiValue = await tradingViewFrame.evaluate(() => {
-            // First look for RSI with exact structure
-            const rsiItems = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
-            for (const item of rsiItems) {
+          // Get RSI and MC value with enhanced debugging
+          const scrapedData = await tradingViewFrame.evaluate(() => {
+            let rsiValue = null;
+            let rsiDebugText = 'RSI debug (monitorTokenRSI): ';
+            let marketCapValue = null;
+            let mcDebugText = 'MC debug (monitorTokenRSI): ';
+
+            // --- RSI Scraping Logic (copied and adapted from enableRsiIndicator) ---
+            const rsiItemsEval = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
+            for (const item of rsiItemsEval) {
               const titleEl = item.querySelector('.title-l31H9iuA.mainTitle-l31H9iuA[data-name="legend-source-title"]');
               const descEl = item.querySelector('.title-l31H9iuA.descTitle-l31H9iuA[data-name="legend-source-title"]');
-              
-              if (titleEl && titleEl.textContent === 'RSI' && descEl && descEl.textContent.includes('SMA')) {
-                const valueEl = item.querySelector('.valueValue-l31H9iuA.apply-common-tooltip[title="Plot"]');
-                if (valueEl) {
-                  const text = valueEl.textContent.trim();
-                  if (text && !isNaN(parseFloat(text))) {
-                    return text;
+              if (titleEl && titleEl.textContent === 'RSI' && descEl && (descEl.textContent.includes('SMA') || descEl.textContent.includes('14'))) {
+                const valueWrapper = item.querySelector('.valuesWrapper-l31H9iuA');
+                if (valueWrapper) {
+                  const valueEl = valueWrapper.querySelector('.valueItem-l31H9iuA .valueValue-l31H9iuA.apply-common-tooltip');
+                  if (valueEl) {
+                    const text = valueEl.textContent.trim();
+                    if (text && !isNaN(parseFloat(text))) {
+                      rsiValue = text;
+                      break;
+                    }
                   }
                 }
               }
             }
-            
-            // Second approach with simpler selectors
-            const rsiSection = document.querySelector('div[data-name="legend-source-item"] div[data-name="legend-source-title"]:first-child');
-            if (rsiSection && rsiSection.textContent === 'RSI') {
-              const parentDiv = rsiSection.closest('div[data-name="legend-source-item"]');
-              const descTitle = parentDiv?.querySelector('div[data-name="legend-source-title"]:nth-child(2)');
-              
-              if (descTitle && descTitle.textContent.includes('SMA')) {
-                const valueItem = parentDiv?.querySelector('.valueValue-l31H9iuA.apply-common-tooltip[title="Plot"]');
-                if (valueItem) {
-                  const text = valueItem.textContent.trim();
-                  if (text && !isNaN(parseFloat(text))) {
-                    return text;
+            if (rsiValue === null) {
+              const rsiSection = document.querySelector('div[data-name="legend-source-item"] div[data-name="legend-source-title"]:first-child');
+              if (rsiSection && rsiSection.textContent === 'RSI') {
+                const parentDiv = rsiSection.closest('div[data-name="legend-source-item"]');
+                const descTitle = parentDiv?.querySelector('div[data-name="legend-source-title"]:nth-child(2)');
+                if (descTitle && (descTitle.textContent.includes('SMA') || descTitle.textContent.includes('14'))) {
+                  const valueWrapper = parentDiv?.querySelector('.valuesWrapper-l31H9iuA');
+                  if (valueWrapper) {
+                    const valueItem = valueWrapper.querySelector('.valueItem-l31H9iuA .valueValue-l31H9iuA.apply-common-tooltip');
+                    if (valueItem) {
+                      const text = valueItem.textContent.trim();
+                      if (text && !isNaN(parseFloat(text))) rsiValue = text;
+                    }
                   }
                 }
               }
             }
-            
-            return null;
-          });
-          
-          // Get market cap value (abbreviated for brevity, full logic in original)
-          marketCapValue = await tradingViewFrame.evaluate(() => {
-            const mcElements = document.querySelectorAll('.valueItem-l31H9iuA');
-            for (const item of mcElements) {
+            if (rsiValue === null) {
+              const plotElements = document.querySelectorAll('.valueValue-l31H9iuA.apply-common-tooltip');
+              for (const el of plotElements) {
+                const container = el.closest('.item-l31H9iuA');
+                if (container && container.textContent.includes('RSI')) {
+                  const text = el.textContent.trim();
+                  if (text && !isNaN(parseFloat(text))) {
+                    const valueNum = parseFloat(text);
+                    if (valueNum >= 0 && valueNum <= 100) {
+                      rsiValue = text;
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+
+            if (rsiValue === null) {
+              const rsiStudyItemsDebug = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
+              if (rsiStudyItemsDebug.length > 0) rsiDebugText += `${rsiStudyItemsDebug.length} .study-l31H9iuA items. First HTML (100c): ${rsiStudyItemsDebug[0].outerHTML.substring(0,100)}. `;
+              else rsiDebugText += 'No .study-l31H9iuA items. ';
+              const legendItemsDebug = document.querySelectorAll('div[data-name="legend-source-item"]');
+              if (legendItemsDebug.length > 0) rsiDebugText += `${legendItemsDebug.length} legend-source-item. First HTML (100c): ${legendItemsDebug[0].outerHTML.substring(0,100)}. `;
+              else rsiDebugText += 'No legend-source-item. ';
+            } else {
+              rsiDebugText = `RSI found in monitor evaluate: ${rsiValue}`;
+            }
+
+            // --- MC Scraping Logic (copied and adapted from enableRsiIndicator) ---
+            const mcElementsEval = document.querySelectorAll('.valueItem-l31H9iuA');
+            for (const item of mcElementsEval) {
               const title = item.querySelector('.valueTitle-l31H9iuA');
               if (title && title.textContent === 'C') {
                 const value = item.querySelector('.valueValue-l31H9iuA');
-                return value ? value.textContent.trim() : null;
+                marketCapValue = value ? value.textContent.trim() : null;
+                break;
               }
             }
-            return null;
-          });
-          
-          // Log the values we found
-          if (rsiValue || marketCapValue) {
-            const timestamp = new Date().toISOString();
-            console.log(`[${timestamp}] Token: ${tokenAddress} | RSI: ${rsiValue || 'N/A'} | MC: ${marketCapValue || 'N/A'}`);
+            if (marketCapValue === null) {
+              const valueItemsDebug = document.querySelectorAll('.valueItem-l31H9iuA');
+              if (valueItemsDebug.length > 0) {
+                mcDebugText += `${valueItemsDebug.length} .valueItem-l31H9iuA items. Titles: `;
+                valueItemsDebug.forEach(item => { const t = item.querySelector('.valueTitle-l31H9iuA'); if(t) mcDebugText += `"${t.textContent}" `; });
+              } else { 
+                mcDebugText += 'No .valueItem-l31H9iuA items. '; 
+              }
+            } else {
+              mcDebugText = `MC found in monitor evaluate: ${marketCapValue}`;
+            }
             
-            // Update token status and check if token is now ready (RSI and MC are working)
-            checkTokenReadiness(tokenAddress, rsiValue, marketCapValue);
+            return { rsiValue, marketCapValue, rsiDebugText, mcDebugText };
+          });
+
+          rsiValue = scrapedData.rsiValue;
+          marketCapValue = scrapedData.marketCapValue;
+
+          // Log raw scraped values and debug text if null
+          const rawScrapedLog = `${tokenAddress}: Raw scraped in monitor - RSI: ${rsiValue === null ? 'N/A' : rsiValue}, MC: ${marketCapValue === null ? 'N/A' : marketCapValue}`;
+          console.log(rawScrapedLog);
+          if (rsiValue === null) {
+            console.log(`${tokenAddress}: ${scrapedData.rsiDebugText}`);
           }
+          if (marketCapValue === null) {
+            console.log(`${tokenAddress}: ${scrapedData.mcDebugText}`);
+          }
+          
+          // Log the values we found (original logging, can be kept or removed if redundant)
+          // if (rsiValue || marketCapValue) { // This check might be redundant now
+          //   const timestamp = new Date().toISOString();
+          //   console.log(`[${timestamp}] Token: ${tokenAddress} | RSI: ${rsiValue || 'N/A'} | MC: ${marketCapValue || 'N/A'}`);
+          // }
+
+          // Update token status and check if token is now ready (RSI and MC are working)
+          // This needs to happen *after* rsiValue might be set to null by validation
+          // checkTokenReadiness(tokenAddress, rsiValue, marketCapValue); 
           
           // Additional validation for RSI values
           if (rsiValue) {
@@ -1425,7 +1552,7 @@ async function monitorTokenRSI(page, tokenAddress) {
         consecutiveNaRsiCount = 0;
       }
       
-      // Check if market cap is below 20K (abbreviated for brevity, full logic in original)
+      // Check if market cap is below 25K
       if (marketCapValue) {
         const mcMatch = marketCapValue.match(/\$?([\d.]+)([KMB])?/);
         
@@ -1437,31 +1564,19 @@ async function monitorTokenRSI(page, tokenAddress) {
           else if (mcUnit === 'M') mcNumeric *= 1000000;
           else if (mcUnit === 'B') mcNumeric *= 1000000000;
           
-          if (mcNumeric < 20000) {
-            if (lowMcStartTime === null) {
-              lowMcStartTime = Date.now();
-              console.log(`${tokenAddress}: Market cap dropped below 20K`);
-            } else {
-              const timeBelow = (Date.now() - lowMcStartTime) / 1000 / 60; // in minutes
-              
-              if (timeBelow >= 4) {
-                logDetailedError(
-                  tokenAddress, 
-                  'LOW_MARKET_CAP', 
-                  `Market cap below 20K for >${timeBelow.toFixed(1)} minutes`,
-                  `Value: ${marketCapValue}`
-                );
-                
-                clearInterval(intervalId);
-                await blacklistCurrentToken("Market cap below 20K for over 4 minutes");
-                return;
-              }
-            }
-          } else {
-            // Reset timer if market cap goes back above 20K
-            if (lowMcStartTime !== null) {
-              lowMcStartTime = null;
-            }
+          // MODIFIED: Changed threshold to 25000 and removed duration logic
+          if (mcNumeric < 25000) {
+            console.log(`${tokenAddress}: Market cap dropped below 25K (${marketCapValue})`);
+            logDetailedError(
+              tokenAddress, 
+              'LOW_MARKET_CAP', 
+              `Market cap below 25K`,
+              `Value: ${marketCapValue}`
+            );
+            
+            clearInterval(intervalId);
+            await blacklistCurrentToken("Market cap below 25K");
+            return; // Exit immediately after blacklisting
           }
         }
       }
@@ -1475,6 +1590,37 @@ async function monitorTokenRSI(page, tokenAddress) {
           // ... (abbreviated)
         }
       }
+      
+      // --- New: Check for stale Market Cap ---
+      if (marketCapValue) { // Ensure we have a marketCapValue to work with
+        if (lastMarketCapValueString === null) {
+          // First time we're seeing a market cap value for this token
+          lastMarketCapValueString = marketCapValue;
+          lastMarketCapChangeTime = Date.now();
+        } else if (marketCapValue !== lastMarketCapValueString) {
+          // Market cap has changed
+          lastMarketCapValueString = marketCapValue;
+          lastMarketCapChangeTime = Date.now();
+        } else {
+          // Market cap is the same as the last one seen
+          if (lastMarketCapChangeTime) { // Ensure lastMarketCapChangeTime is set
+            const timeUnchanged = (Date.now() - lastMarketCapChangeTime) / 1000; // in seconds
+            if (timeUnchanged > 120) {
+              console.log(`${tokenAddress}: Market Cap (${marketCapValue}) unchanged for over ${timeUnchanged.toFixed(0)} seconds.`);
+              logDetailedError(
+                tokenAddress,
+                'STALE_MARKET_CAP',
+                `Market Cap unchanged for >120s. Last MC: ${lastMarketCapValueString}`,
+                `Current MC: ${marketCapValue}`
+              );
+              clearInterval(intervalId);
+              await blacklistCurrentToken("Market Cap unchanged for >120 seconds");
+              return; // Exit monitoring for this token
+            }
+          }
+        }
+      }
+      // --- End: New Stale Market Cap Check ---
     } catch (error) {
       console.error(`Error checking values for ${tokenAddress}:`, error.message);
       logDetailedError(tokenAddress, 'MONITORING_ERROR', error.message);
@@ -1562,91 +1708,19 @@ async function openTokenPage(browser, tokenAddress) {
       // Navigate to website
       console.log(`Navigating to website for token: ${tokenAddress}`);
       updateTokenStatus(tokenAddress, 'Navigating', 'Opening chart website...');
-      await page.goto('https://photon-sol.tinyastro.io', { 
+      // Construct the direct URL for the token on jup.ag
+      const tokenPageUrl = `https://jup.ag/tokens/${tokenAddress}`;
+      console.log(`${tokenAddress}: Attempting to navigate to URL: ${tokenPageUrl}`);
+      await page.goto(tokenPageUrl, { 
         waitUntil: 'networkidle2',
         timeout: 60000
       });
       
       // Wait for the page to be fully loaded
-      updateTokenStatus(tokenAddress, 'Page Loaded', 'Waiting for search box to appear');
-      await delay(3000);
-      
-      // Wait for the search input to be available
-      await page.waitForSelector('.c-autocomplete__input.js-autocomplete', { visible: true, timeout: 10000 });
-      updateTokenStatus(tokenAddress, 'Ready to Search', 'Found search input, preparing to search for token');
-      
-      // Clear any existing text in the search field
-      await page.evaluate(() => {
-        const searchInput = document.querySelector('.c-autocomplete__input.js-autocomplete');
-        if (searchInput) searchInput.value = '';
-      });
-      
-      // Type the token address in the search bar
-      console.log(`Searching for token: ${tokenAddress}`);
-      updateTokenStatus(tokenAddress, 'Searching', `Typing token address: ${tokenAddress}`);
-      await page.type('.c-autocomplete__input.js-autocomplete', tokenAddress, { delay: 100 });
-      
-      // Wait for search results to appear
-      updateTokenStatus(tokenAddress, 'Waiting for Results', 'Waiting for search results to appear');
-      await delay(3000);
-      
-      try {
-        await page.waitForSelector('#autoComplete_list_1:not([hidden])', { visible: true, timeout: 10000 });
-        updateTokenStatus(tokenAddress, 'Results Found', 'Search results appeared');
-      } catch (error) {
-        updateTokenStatus(tokenAddress, 'Results Timeout', 'Search results taking longer than expected');
-        // Continue silently
-      }
-      
-      // Wait for search results to be populated
-      await delay(2000);
-      
-      // Try to click on the first search result with retry logic
-      let clicked = false;
-      for (let attempt = 0; attempt < 3 && !clicked; attempt++) {
-        updateTokenStatus(tokenAddress, 'Clicking Result', `Attempting to click search result (attempt ${attempt + 1}/3)`);
-        clicked = await page.evaluate(() => {
-          const firstResult = document.querySelector('#autoComplete_result_0 a');
-          if (firstResult) {
-            firstResult.click();
-            return true;
-          }
-          return false;
-        });
-        
-        if (!clicked) {
-          updateTokenStatus(tokenAddress, 'Click Failed', `Search result click failed, retrying (${attempt + 1}/3)`);
-          await delay(2000);
-        }
-      }
-      
-      if (!clicked) {
-        // Try one more approach - look for any result that might match
-        updateTokenStatus(tokenAddress, 'Alternative Click', 'Trying alternative method to click search result');
-        const alternativeClicked = await page.evaluate(() => {
-          // Try to find any result element
-          const anyResult = document.querySelector('.c-autocomplete__item a');
-          if (anyResult) {
-            anyResult.click();
-            return true;
-          }
-          return false;
-        });
-        
-        if (!alternativeClicked) {
-          updateTokenStatus(tokenAddress, 'No Results', 'Could not find any search results to click');
-          throw new Error('Could not find any search results to click');
-        } else {
-          updateTokenStatus(tokenAddress, 'Alternative Click Success', 'Successfully clicked alternate search result');
-        }
-      } else {
-        updateTokenStatus(tokenAddress, 'Result Clicked', 'Successfully clicked search result');
-      }
-      
-      // Wait for the page to load with the chart (longer wait)
-      console.log('Waiting for chart to load...');
-      updateTokenStatus(tokenAddress, 'Loading Chart', 'Waiting for TradingView chart to load');
-      await delay(10000);
+      updateTokenStatus(tokenAddress, 'Page Loaded', 'Token page loaded, waiting for chart elements...');
+      await delay(5000); // Initial delay, might need adjustment for jup.ag. Increased to 5s for chart to appear.
+      // The extensive search and click logic previously here has been removed
+      // as we are navigating directly to the token page.
 
       // Try to enable RSI indicator with retries
       console.log(`${tokenAddress}: Trying to enable RSI indicator after chart load`);
@@ -1696,6 +1770,12 @@ async function openTokenPage(browser, tokenAddress) {
       // Store the last error
       lastError = error;
       
+      // CHECK: Remove token from monitoredTokens before retrying to allow full re-attempt
+      if (retryCount + 1 < MAX_RETRIES) { // If we are going to retry
+        monitoredTokens.delete(tokenAddress);
+        console.log(`${tokenAddress}: Removed from monitoredTokens before retry.`);
+      }
+
       // Check if this is a connection error
       if (error.message.includes('Connection closed') || 
           error.message.includes('Protocol error') ||
@@ -1706,25 +1786,19 @@ async function openTokenPage(browser, tokenAddress) {
         updateTokenStatus(tokenAddress, 'Connection Error', `Browser connection error: ${error.message}`);
         consecutiveConnectionErrors++;
         
-        // If we've hit the threshold, restart the browser
         if (consecutiveConnectionErrors >= connectionErrorThreshold) {
           await restartBrowser();
-          // Reset retry count to give one more chance after browser restart
           retryCount = 0;
           continue;
         }
       } else {
-        // For other errors, log and retry
         console.error(`Error opening page for token ${tokenAddress}: ${error.message} (attempt ${retryCount + 1}/${MAX_RETRIES})`);
         updateTokenStatus(tokenAddress, 'Error', `Error: ${error.message} (attempt ${retryCount + 1}/${MAX_RETRIES})`);
-        // Reset connection error counter for non-connection errors
         consecutiveConnectionErrors = 0;
       }
       
-      // Increment retry count
       retryCount++;
       
-      // Wait before retrying
       if (retryCount < MAX_RETRIES) {
         console.log(`Retrying token ${tokenAddress} in 5 seconds...`);
         updateTokenStatus(tokenAddress, 'Retrying', `Will retry in 5 seconds (attempt ${retryCount + 1}/${MAX_RETRIES})`);
@@ -1733,11 +1807,9 @@ async function openTokenPage(browser, tokenAddress) {
     }
   }
   
-  // If we get here, we've failed after all retries
   console.error(`Failed to open page for token ${tokenAddress} after ${MAX_RETRIES} attempts`);
   updateTokenStatus(tokenAddress, 'Failed', `Failed after ${MAX_RETRIES} attempts: ${lastError ? lastError.message : 'Unknown error'}`);
   
-  // Log detailed error
   logDetailedError(
     tokenAddress, 
     'TOKEN_OPEN_ERROR', 
@@ -1745,12 +1817,10 @@ async function openTokenPage(browser, tokenAddress) {
     `Failed after ${MAX_RETRIES} attempts`
   );
   
-  // Remove from monitored and pending tokens
   monitoredTokens.delete(tokenAddress);
   pendingTokens.delete(tokenAddress);
   tokensReadyStatus.delete(tokenAddress);
   
-  // Process next token
   console.log(`Moving to next token after failure with ${tokenAddress}`);
   setTimeout(() => {
     processNextTokenFromQueue();
@@ -2012,7 +2082,7 @@ async function run() {
     
     // Launch browser with proper extension loading and persistent profile
     browser = await puppeteer.launch({
-      headless: true,
+      headless: false,
       defaultViewport: null,
       userDataDir: userDataDir,
       args: [
@@ -2072,7 +2142,8 @@ async function run() {
     // Navigate to website
     console.log('Navigating to website');
     try {
-      await page.goto('https://photon-sol.tinyastro.io', { 
+      // Navigate to jup.ag
+      await page.goto('https://jup.ag', { 
         waitUntil: 'networkidle2',
         timeout: 60000
       });
