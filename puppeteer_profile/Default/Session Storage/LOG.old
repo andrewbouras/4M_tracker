@@ -1,3 +1,15 @@
-2025/05/11-14:53:28.746 283fa Reusing MANIFEST /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Session Storage/MANIFEST-000001
-2025/05/11-14:53:28.748 283fa Recovering log #60
-2025/05/11-14:53:28.750 283fa Reusing old log /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Session Storage/000060.log 
+2025/05/13-15:07:19.855 1af69 Reusing MANIFEST /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Session Storage/MANIFEST-000001
+2025/05/13-15:07:19.856 1af69 Recovering log #13
+2025/05/13-15:07:19.858 1af69 Reusing old log /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Session Storage/000013.log 
+2025/05/13-15:11:28.978 1af6b Level-0 table #17: started
+2025/05/13-15:11:28.985 1af6b Level-0 table #17: 11687 bytes OK
+2025/05/13-15:11:28.994 1af6b Delete type=0 #13
+2025/05/13-15:11:28.996 1af69 Compacting 4@0 + 1@1 files
+2025/05/13-15:11:29.004 1af69 Generated table #18@0: 1044 keys, 29382 bytes
+2025/05/13-15:11:29.004 1af69 Compacted 4@0 + 1@1 files => 29382 bytes
+2025/05/13-15:11:29.010 1af69 compacted to: files[ 0 1 1 0 0 0 0 ]
+2025/05/13-15:11:29.012 1af69 Delete type=2 #14
+2025/05/13-15:11:29.013 1af69 Delete type=2 #17
+2025/05/13-15:11:29.013 1af69 Delete type=2 #7
+2025/05/13-15:11:29.013 1af69 Delete type=2 #12
+2025/05/13-15:11:29.013 1af69 Delete type=2 #10

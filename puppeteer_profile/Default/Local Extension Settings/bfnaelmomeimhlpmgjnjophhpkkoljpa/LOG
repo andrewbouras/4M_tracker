@@ -1,9 +1,21 @@
-2025/05/11-14:56:54.795 28f70 Reusing MANIFEST /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa/MANIFEST-000001
-2025/05/11-14:56:54.795 28f70 Recovering log #34
-2025/05/11-14:56:54.795 28f70 Reusing old log /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa/000034.log 
-2025/05/11-14:57:02.063 28f6d Compacting 1@1 + 1@2 files
-2025/05/11-14:57:02.078 28f6d Generated table #37@1: 40 keys, 827452 bytes
-2025/05/11-14:57:02.078 28f6d Compacted 1@1 + 1@2 files => 827452 bytes
-2025/05/11-14:57:02.088 28f6d compacted to: files[ 0 0 1 0 0 0 0 ]
-2025/05/11-14:57:02.090 28f6d Delete type=2 #35
-2025/05/11-14:57:02.091 28f6d Delete type=2 #32
+2025/05/13-15:18:31.520 1f6e7 Reusing MANIFEST /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa/MANIFEST-000001
+2025/05/13-15:18:31.521 1f6e7 Recovering log #40
+2025/05/13-15:18:31.544 1f6e7 Reusing old log /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/Local Extension Settings/bfnaelmomeimhlpmgjnjophhpkkoljpa/000040.log 
+2025/05/13-15:28:32.785 1f6e6 Level-0 table #44: started
+2025/05/13-15:28:32.810 1f6e6 Level-0 table #44: 810973 bytes OK
+2025/05/13-15:28:32.816 1f6e6 Delete type=0 #40
+2025/05/13-15:32:33.266 1f6e4 Compacting 1@1 + 1@2 files
+2025/05/13-15:32:33.278 1f6e4 Generated table #45@1: 40 keys, 834257 bytes
+2025/05/13-15:32:33.279 1f6e4 Compacted 1@1 + 1@2 files => 834257 bytes
+2025/05/13-15:32:33.284 1f6e4 compacted to: files[ 0 0 1 0 0 0 0 ]
+2025/05/13-15:52:08.844 1f6e6 Level-0 table #47: started
+2025/05/13-15:52:08.865 1f6e6 Level-0 table #47: 601218 bytes OK
+2025/05/13-15:52:08.873 1f6e6 Delete type=0 #43
+2025/05/13-15:52:08.873 1f6e6 Delete type=2 #41
+2025/05/13-15:52:08.873 1f6e6 Delete type=2 #44
+2025/05/13-15:55:09.192 1f6e4 Compacting 1@1 + 1@2 files
+2025/05/13-15:55:09.201 1f6e4 Generated table #48@1: 40 keys, 835898 bytes
+2025/05/13-15:55:09.202 1f6e4 Compacted 1@1 + 1@2 files => 835898 bytes
+2025/05/13-15:55:09.207 1f6e4 compacted to: files[ 0 0 1 0 0 0 0 ]
+2025/05/13-15:55:09.207 1f6e4 Delete type=2 #45
+2025/05/13-15:55:09.207 1f6e4 Delete type=2 #47

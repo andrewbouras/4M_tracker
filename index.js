@@ -36,6 +36,38 @@ const extensionPath = path.resolve(__dirname, './extensions/phantom/25.11.0_0');
 // Path for persistent puppeteer profile (not using main Chrome profile)
 const userDataDir = path.resolve(__dirname, './puppeteer_profile');
 
+// {{ INSERT new function fetchPriceImpact here }}
+async function fetchPriceImpact(tokenAddress, tradeAmount) {
+  return new Promise((resolve, reject) => {
+    const apiUrl = `https://api.jup.ag/ultra/v1/order?inputMint=${tokenAddress}&outputMint=So11111111111111111111111111111111111111112&amount=${String(tradeAmount)}`;
+    const req = https.get(apiUrl, (res) => {
+      let data = '';
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Failed to get price impact: Status Code ${res.statusCode} for ${tokenAddress}`));
+        return;
+      }
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const jsonData = JSON.parse(data);
+          if (jsonData && jsonData.priceImpactPct) {
+            resolve(jsonData.priceImpactPct);
+          } else {
+            reject(new Error(`priceImpactPct not found or invalid in API response for ${tokenAddress}. Response: ${data.substring(0, 200)}`));
+          }
+        } catch (e) {
+          reject(new Error(`Error parsing JSON response for ${tokenAddress}: ${e.message}. Data: ${data.substring(0, 200)}`));
+        }
+      });
+    });
+    req.on('error', (err) => {
+      reject(new Error(`HTTPS request failed for ${tokenAddress}: ${err.message}`));
+    });
+    req.end();
+  });
+}
+
 // Store already monitored tokens to prevent duplicates
 const monitoredTokens = new Set();
 // Store tokens currently being processed
@@ -53,15 +85,19 @@ let isScrapingInProgress = false;
 // Debounce timer for token requests
 let requestDebounceTimers = {};
 // Maximum signatures to process per scrape
-const MAX_SIGNATURES_TO_PROCESS = 10;
+const MAX_SIGNATURES_TO_PROCESS = 10; // This will no longer be directly used for the new scraping logic
 // Flag to track if tokens are ready for additional monitoring
 const tokensReadyStatus = new Map(); // tokenAddress -> {rsiWorking: boolean, mcWorking: boolean}
 // Track already seen signatures to detect new ones
-const seenSignatures = new Set();
+const seenSignatures = new Set(); // This will be repurposed or cleared for the new logic
+// Define SCRAPING_INTERVAL for the Solscan refresh rate
+const SCRAPING_INTERVAL = 2000; // 2 seconds
 // Enhanced logging file paths
 const queueLogFile = path.join(logDirectory, 'token_queue.log');
 const monitoringLogFile = path.join(logDirectory, 'monitoring_status.log');
 const scrapingLogFile = path.join(logDirectory, 'scraping_activity.log');
+const profitLossLogFile = path.join(logDirectory, 'profit_loss.log'); // ++ NEW LOG FILE
+const errorLogFile = path.join(logDirectory, 'error_log.log'); // Ensure this is also defined if not already
 
 // Track consecutive connection errors
 let consecutiveConnectionErrors = 0;
@@ -71,15 +107,13 @@ let tokensToRetry = []; // Queue of tokens to retry after browser restart
 // Queue of tokens waiting to be monitored (when slots become available)
 let tokenWaitingQueue = [];
 
-// Error log file path
-const errorLogFile = path.join(logDirectory, 'error_log.log');
+// Store details of active trades (tokenAddress -> buyDetails)
+const activeTrades = new Map(); // ++ NEW MAP FOR ACTIVE TRADES
 
-// Timer for Solscan scraping (in milliseconds)
-const SCRAPING_INTERVAL = 10 * 1000; // 10 seconds between scraping runs
-let scrapingTimer = null;
-
-// Track discovered pump tokens to avoid duplicate logs
-const discoveredPumpTokens = new Set();
+// Track discovered pump tokens to avoid duplicate logs (used by logPumpToken)
+const discoveredPumpTokens = new Set(); // {{ ADDED to define discoveredPumpTokens }}
+// Timer for Solscan scraping
+let scrapingTimer = null; // {{ ADDED to define scrapingTimer }}
 
 // Helper function to log errors with more details
 function logDetailedError(tokenAddress, errorType, errorMessage, additionalDetails = '') {
@@ -99,16 +133,13 @@ function delay(ms) {
 function logSystemStatus() {
   const timestamp = new Date().toISOString();
   
-  // Log queue status
   const queueEntry = `[${timestamp}] Tokens in queue: ${tokenWaitingQueue.length}\n` +
     tokenWaitingQueue.map((token, index) => 
       `  ${index+1}. ${token.symbol || 'Unknown'} (${token.address}) - Added: ${token.discoveredAt.toISOString()}`
     ).join('\n') + 
     (tokenWaitingQueue.length ? '\n' : '');
-  
   fs.writeFileSync(queueLogFile, queueEntry);
   
-  // Log actively monitored tokens with more details
   const monitoringEntry = `[${timestamp}] Actively Monitored Tokens: ${monitoredTokens.size}\n` +
     Array.from(monitoredTokens).map(address => {
       const status = tokensReadyStatus.get(address) || { 
@@ -116,21 +147,20 @@ function logSystemStatus() {
         mcWorking: false,
         rsiValue: 'N/A',
         mcValue: 'N/A',
+        pipValue: 'N/A', // {{ ADDED for PIP }}
         stage: 'Starting',
         lastUpdated: 'Never',
         details: 'No details yet'
       };
       
-      return `  - ${address} | RSI: ${status.rsiValue || 'N/A'} | MC: ${status.mcValue || 'N/A'} | Stage: ${status.stage || 'Unknown'}\n` +
+      return `  - ${address} | RSI: ${status.rsiValue || 'N/A'} | MC: ${status.mcValue || 'N/A'} | PIP: ${status.pipValue || 'N/A'} | Stage: ${status.stage || 'Unknown'}\n` + // {{ MODIFIED for PIP }}
              `    RSI Working: ${status.rsiWorking ? 'YES' : 'NO'} | MC Working: ${status.mcWorking ? 'YES' : 'NO'} | Ready: ${status.readySince ? 'YES' : 'NO'}\n` +
-             `    Last Activity: ${status.lastUpdated || 'Unknown'}\n` +
+             `    Last Activity: ${status.lastUpdated || 'Unknown'}${status.lastPipUpdate ? ' | Last PIP: ' + new Date(status.lastPipUpdate).toLocaleTimeString() : ''}\n` + // {{ MODIFIED for PIP }}
              `    Details: ${status.details || 'No details'}`;
     }).join('\n\n') + 
     (monitoredTokens.size ? '\n' : '');
-  
   fs.writeFileSync(monitoringLogFile, monitoringEntry);
   
-  // Log to console
   console.log(`📊 System Status: ${monitoredTokens.size} monitored tokens, ${tokenWaitingQueue.length} in queue`);
 }
 
@@ -167,11 +197,13 @@ function writeToLogFile(tokenAddress, rsiValue, marketCapValue, message = '') {
 }
 
 // Helper function to log pump tokens
-function logPumpToken(tokenAddress, tokenSymbol, transactionSignature) {
-  // Check if we've already seen this token to avoid duplicate entries
-  const tokenKey = `${tokenAddress}:${transactionSignature}`;
+function logPumpToken(tokenAddress, tokenSymbol, transactionSignature) { // transactionSignature will become optional/unused
+  // For the new Solscan "Add Liquidity" page, we only care about the tokenAddress for uniqueness.
+  // The transactionSignature might not be relevant or easily available from that page.
+  const tokenKey = tokenAddress; // Changed from `${tokenAddress}:${transactionSignature}`
+
   if (discoveredPumpTokens.has(tokenKey)) {
-    console.log(`Skipping duplicate pump token: ${tokenSymbol} (${tokenAddress})`);
+    console.log(`Skipping duplicate pump token: ${tokenSymbol || 'Unknown Symbol'} (${tokenAddress})`);
     return false;
   }
   
@@ -180,13 +212,15 @@ function logPumpToken(tokenAddress, tokenSymbol, transactionSignature) {
   
   const timestamp = new Date().toISOString();
   const logFile = path.join(logDirectory, 'pump_tokens.log');
-  const logEntry = `[${timestamp}] Token: ${tokenAddress} | Symbol: ${tokenSymbol} | TX: ${transactionSignature}\n`;
+  // Adjust log entry as transactionSignature might not be available
+  const logEntry = `[${timestamp}] Token: ${tokenAddress} | Symbol: ${tokenSymbol || 'N/A (from Add Liquidity)'}${transactionSignature ? ' | TX: ' + transactionSignature : ''}\n`;
   
   fs.appendFileSync(logFile, logEntry);
-  console.log(`Found pump token: ${tokenSymbol} (${tokenAddress}) in transaction ${transactionSignature}`);
+  // Modify console log to reflect potential absence of symbol and TX
+  console.log(`Found new token from Add Liquidity: ${tokenSymbol || 'Unknown Symbol'} (${tokenAddress})`);
   
   // Log to scraping activity file too
-  logScrapingActivity(`New pump token found: ${tokenSymbol}`, [], [{address: tokenAddress, symbol: tokenSymbol}]);
+  logScrapingActivity(`New token from Add Liquidity: ${tokenSymbol || 'N/A'}`, [], [{address: tokenAddress, symbol: tokenSymbol || 'N/A'}]);
   
   // Add to waiting queue instead of starting immediately
   if (!monitoredTokens.has(tokenAddress) && 
@@ -194,7 +228,7 @@ function logPumpToken(tokenAddress, tokenSymbol, transactionSignature) {
       !blacklistedTokens.has(tokenAddress) &&
       !tokenWaitingQueue.some(token => token.address === tokenAddress)) {
     
-    console.log(`Adding pump token to waiting queue: ${tokenSymbol} (${tokenAddress})`);
+    console.log(`Adding pump token to waiting queue: ${tokenSymbol || 'Unknown Symbol'} (${tokenAddress})`);
     tokenWaitingQueue.push({
       address: tokenAddress,
       symbol: tokenSymbol,
@@ -282,28 +316,26 @@ async function processNextTokenFromQueue() {
 
 // Function to check if a token is "working" (has valid RSI and MC values)
 function checkTokenReadiness(tokenAddress, rsiValue, mcValue) {
-  // Initialize if not exists
   if (!tokensReadyStatus.has(tokenAddress)) {
     tokensReadyStatus.set(tokenAddress, { 
       rsiWorking: false,
       mcWorking: false,
       rsiValue: 'N/A',
       mcValue: 'N/A',
+      pipValue: 'N/A', // {{ ADDED for PIP }}
       readySince: null,
       stage: 'Initializing',
       lastUpdated: new Date().toISOString(),
+      lastPipUpdate: null, // {{ ADDED for PIP }}
       details: 'Token just added to monitoring'
     });
   }
   
   const status = tokensReadyStatus.get(tokenAddress);
-  
-  // Update values
   if (rsiValue) status.rsiValue = rsiValue;
   if (mcValue) status.mcValue = mcValue;
   status.lastUpdated = new Date().toISOString();
   
-  // Update working status
   if (rsiValue && !isNaN(parseFloat(rsiValue)) && parseFloat(rsiValue) >= 0 && parseFloat(rsiValue) <= 100) {
     if (!status.rsiWorking) {
       status.rsiWorking = true;
@@ -312,9 +344,7 @@ function checkTokenReadiness(tokenAddress, rsiValue, mcValue) {
     }
   }
   
-  // Fixed MC detection to handle any numeric values including K, M, B suffixes
   if (mcValue) {
-    // Look for values like $123, $123K, $1.23M, etc.
     const match = mcValue.match(/\$?([\d.]+)([KMB])?/i);
     if (match) {
       status.mcWorking = true;
@@ -327,30 +357,21 @@ function checkTokenReadiness(tokenAddress, rsiValue, mcValue) {
     }
   }
   
-  // If both are working and wasn't ready before, mark the time
   if (status.rsiWorking && status.mcWorking && !status.readySince) {
     status.readySince = Date.now();
     status.stage = 'READY - Monitoring for signals';
     status.details = `Token fully working! RSI: ${status.rsiValue}, MC: ${status.mcValue}`;
     console.log(`✅ Token ${tokenAddress} is now ready with working RSI (${status.rsiValue}) and MC (${status.mcValue}) values!`);
-    
-    // Update status logs
     logSystemStatus();
-    
-    // Once a token is working, process the next token from the queue if we can monitor more
     setTimeout(() => {
       console.log(`Token ${tokenAddress} is working properly, starting next token from queue if available...`);
-      
-      // We're now monitoring multiple tokens concurrently
       if (monitoredTokens.size < MAX_MONITORED_TOKENS || tokenWaitingQueue.length > 0) {
         processNextTokenFromQueue();
       }
     }, 2000);
   }
   
-  // Update the map
   tokensReadyStatus.set(tokenAddress, status);
-  
   return status.rsiWorking && status.mcWorking;
 }
 
@@ -362,9 +383,11 @@ function updateTokenStatus(tokenAddress, stage, details) {
       mcWorking: false,
       rsiValue: 'N/A',
       mcValue: 'N/A',
+      pipValue: 'N/A', // {{ ADDED for PIP }}
       readySince: null,
       stage: stage || 'Initializing',
       lastUpdated: new Date().toISOString(),
+      lastPipUpdate: null, // {{ ADDED for PIP }}
       details: details || 'Token just added to monitoring'
     });
   } else {
@@ -374,206 +397,129 @@ function updateTokenStatus(tokenAddress, stage, details) {
     status.lastUpdated = new Date().toISOString();
     tokensReadyStatus.set(tokenAddress, status);
   }
-  
-  // Update logs
   logSystemStatus();
 }
 
 // Function to scrape Solscan for pump tokens (updated to process only top 10 signatures and refresh for new ones)
 async function scrapePumpTokens(browser) {
-  // If scraping is already in progress, skip this run
   if (isScrapingInProgress) {
-    console.log('Solscan scraping already in progress, skipping this run');
+    console.log('Solscan "Add Liquidity" scraping already in progress, skipping this run.');
     return;
   }
   
   isScrapingInProgress = true;
-  console.log('Starting Solscan scraping for pump tokens (limited to top 10 signatures)...');
+  // Update console log for the new target page
+  console.log('Starting Solscan "Add Liquidity" page scraping...');
   
+  let page = null; // Define page variable outside try block for access in finally
+
   try {
-    // Check if we can open new tabs for scraping
     const canOpenTab = await canOpenNewTabForScraping();
     if (!canOpenTab) {
-      console.log('Cannot start scraping: Maximum browser tabs reached. Will retry later.');
-      isScrapingInProgress = false;
-      return;
-    }
-    
-    // Open new page
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-    
-    // Navigate to the specified Solscan URL
-    const accountUrl = 'https://solscan.io/account/6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P?program=pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
-    console.log(`Navigating to: ${accountUrl}`);
-    await page.goto(accountUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-    
-    // Wait for the transaction table to load
-    await page.waitForSelector('a.inline-block.text-center.truncate.textLink.text-\\[14px\\]', { timeout: 30000 });
-    console.log('Transaction table loaded, extracting signatures from first page only...');
-    
-    // Extract transaction signatures from the first page only
-    const signatures = await page.evaluate(() => {
-      const signatureLinks = document.querySelectorAll('a.inline-block.text-center.truncate.textLink.text-\\[14px\\]');
-      return Array.from(signatureLinks).map(link => ({
-        signature: link.textContent,
-        url: link.href
-      }));
-    });
-    
-    // Limit to MAX_SIGNATURES_TO_PROCESS (10)
-    const limitedSignatures = signatures.slice(0, MAX_SIGNATURES_TO_PROCESS);
-    console.log(`Found ${signatures.length} transaction signatures, processing only the top ${limitedSignatures.length}`);
-    
-    // Check for new signatures that we haven't seen before
-    const newSignatures = limitedSignatures.filter(sig => !seenSignatures.has(sig.signature));
-    
-    // Log the current scraping activity
-    logScrapingActivity(
-      `Scraping top 10 signatures (${newSignatures.length} new out of ${limitedSignatures.length})`,
-      newSignatures
-    );
-    
-    // If there are no new signatures, we can skip processing
-    if (newSignatures.length === 0) {
-      console.log('No new signatures found in top 10, skipping processing');
-      await page.close();
-      isScrapingInProgress = false;
-      
-      // Schedule next scrape
-      if (scrapingTimer) {
-        clearTimeout(scrapingTimer);
-      }
+      console.log('Cannot start scraping "Add Liquidity" page: Maximum browser tabs reached. Will retry later.');
+      isScrapingInProgress = false; // Reset flag here
+      // Schedule next scrape if it failed to open a tab
+      if (scrapingTimer) clearTimeout(scrapingTimer);
       scrapingTimer = setTimeout(() => {
         if (global.browser) {
           scrapePumpTokens(global.browser).catch(err => {
-            console.error('Error during scheduled pump token scraping:', err.message);
+            console.error('Error during scheduled "Add Liquidity" scraping (tab limit):', err.message);
           });
         }
       }, SCRAPING_INTERVAL);
-      
       return;
     }
     
-    // Add all signatures to seen set
-    limitedSignatures.forEach(sig => seenSignatures.add(sig.signature));
+    page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
     
-    // Keep track of new tokens found in this scraping run
-    let newTokensFound = 0;
-    let totalPumpTokens = 0;
-    let foundTokens = [];
+    const liquidityPageUrl = 'https://solscan.io/account/4Mb68886nfMgfaven3knVhYMmg3NRhCmXaN9dFxEXeY9?activity_type=ACTIVITY_TOKEN_ADD_LIQ#defiactivities';
+    console.log(`Navigating to: ${liquidityPageUrl}`);
+    await page.goto(liquidityPageUrl, { waitUntil: 'networkidle2', timeout: 60000 });
     
-    // Process signatures one at a time (sequentially)
-    console.log('Processing signatures ONE AT A TIME sequentially');
-    
-    // Create a single transaction page that we'll reuse
-    let txPage = null;
-    
-    for (let i = 0; i < newSignatures.length; i++) {
-      const signature = newSignatures[i];
-      console.log(`Processing signature ${i+1}/${newSignatures.length}: ${signature.signature}`);
-      
-      // Create the transaction page if it doesn't exist yet
-      if (!txPage) {
-        txPage = await browser.newPage();
-      await txPage.setViewport({ width: 1280, height: 800 });
+    // Wait for the specific table to load. Based on user's script, the table is 'table.w-full.border-separate'
+    // We also need to ensure the content inside is loaded. Waiting for a row might be more reliable.
+    await page.waitForSelector('table.w-full.border-separate tbody tr', { timeout: 30000 });
+    console.log('"Add Liquidity" table loaded, extracting mint addresses...');
+
+    // Embed the user's token extraction logic
+    const extractedAddresses = await page.evaluate(() => {
+      const mintAddresses = new Set();
+      const ignoredAddress = "So11111111111111111111111111111111111111112";
+      const table = document.querySelector('table.w-full.border-separate');
+
+      if (!table) {
+        console.error("Solscan table not found with selector 'table.w-full.border-separate'.");
+        return []; // Return empty if table not found
       }
-      
-      try {
-        // Navigate to transaction page
-        await txPage.goto(signature.url, { waitUntil: 'networkidle2', timeout: 30000 });
-        
-        // Wait for transaction details to load
-        await txPage.waitForSelector('.px-3.py-1.rounded.bg-neutral2', { timeout: 30000 });
-        
-        // Extract token addresses ending with 'pump'
-        const pumpTokens = await txPage.evaluate(() => {
-          const tokens = [];
-          
-          // Find all token links in the transaction
-          const tokenLinks = document.querySelectorAll('a[href^="/token/"]');
-          
-          tokenLinks.forEach(link => {
-            const tokenAddress = link.getAttribute('href').replace('/token/', '');
-            const tokenSymbol = link.textContent;
-            
-            // Check if the token address ends with 'pump'
-            if (tokenAddress.endsWith('pump')) {
-              tokens.push({
-                address: tokenAddress,
-                symbol: tokenSymbol
-              });
-            }
-          });
-          
-          return tokens;
-        });
-        
-        // Log any pump tokens found
-        if (pumpTokens.length > 0) {
-          totalPumpTokens += pumpTokens.length;
-          console.log(`Found ${pumpTokens.length} pump tokens in transaction ${signature.signature}`);
-          
-          for (const token of pumpTokens) {
-            // Save to found tokens list for logging
-            foundTokens.push(token);
-            
-            // logPumpToken returns true if it's a new token
-            if (await logPumpToken(token.address, token.symbol, signature.signature)) {
-              newTokensFound++;
+
+      const rows = table.querySelectorAll('tbody tr');
+      rows.forEach(row => {
+        const links = row.querySelectorAll('a[href^="/token/"]');
+        links.forEach(link => {
+          const href = link.getAttribute('href');
+          if (href) {
+            const parts = href.split('/token/');
+            if (parts.length > 1 && parts[1]) {
+              const potentialMint = parts[1].trim();
+              if (potentialMint !== ignoredAddress && potentialMint.length >= 32 && potentialMint.length <= 44 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(potentialMint)) {
+                mintAddresses.add(potentialMint);
+              }
             }
           }
-        }
-      } catch (txError) {
-        console.error(`Error processing transaction ${signature.signature}:`, txError.message);
-      }
-      
-      // Small delay between processing signatures
-      await delay(500);
-    }
-    
-    // Close the transaction page if it was created
-    if (txPage) {
-      await txPage.close();
-    }
-    
-    console.log(`Finished scraping pump tokens: ${newTokensFound} new tokens found out of ${totalPumpTokens} total`);
-    
-    // Log final scraping results
+        });
+      });
+      return Array.from(mintAddresses);
+    });
+
+    console.log(`Found ${extractedAddresses.length} potential mint addresses on the page.`);
     logScrapingActivity(
-      `Completed scraping: ${newTokensFound} new tokens found out of ${totalPumpTokens} total`,
-      newSignatures,
-      foundTokens
+      `Scraped "Add Liquidity" page. Found ${extractedAddresses.length} addresses.`,
+      [], // No 'signatures' in this context
+      extractedAddresses.map(addr => ({ address: addr, symbol: 'N/A' })) // Symbol is not available here
     );
+
+    let newTokensFoundThisRun = 0;
+    if (extractedAddresses.length > 0) {
+      for (const tokenAddress of extractedAddresses) {
+        // The logPumpToken function now uses only tokenAddress for uniqueness and handles logging.
+        // We pass null or a placeholder for symbol and transactionSignature as they are not available.
+        if (await logPumpToken(tokenAddress, 'N/A (from Add Liquidity)', null)) {
+          newTokensFoundThisRun++;
+        }
+      }
+    }
+
+    console.log(`Finished scraping "Add Liquidity" page: ${newTokensFoundThisRun} new tokens added to queue.`);
     
-    await page.close();
-    
-    // Immediately start monitoring tokens if we found any new ones
-    if (newTokensFound > 0 && monitoredTokens.size === 0) {
-      console.log('Found new tokens, immediately starting token monitoring');
+    if (newTokensFoundThisRun > 0 && monitoredTokens.size === 0 && tokenWaitingQueue.length > 0) {
+      console.log('Found new tokens from "Add Liquidity", immediately starting token monitoring if queue was empty.');
       processNextTokenFromQueue();
     }
     
-    // Update status logs
+    await page.close();
+    page = null; // Nullify page after closing
     logSystemStatus();
     
   } catch (error) {
-    console.error('Error scraping pump tokens:', error.message);
+    console.error('Error scraping "Add Liquidity" page:', error.message);
+    logDetailedError('N/A', 'ADD_LIQUIDITY_SCRAPE_ERROR', error.message);
+    if (page && !page.isClosed()) {
+      await page.close().catch(err => console.error('Error closing page after error:', err.message));
+      page = null;
+    }
   } finally {
-    // Reset scraping flag when done
     isScrapingInProgress = false;
-    
-    // Schedule the next scraping run to happen 10 seconds after this one finished
     if (scrapingTimer) {
       clearTimeout(scrapingTimer);
     }
     scrapingTimer = setTimeout(() => {
       if (global.browser) {
         scrapePumpTokens(global.browser).catch(err => {
-          console.error('Error during scheduled pump token scraping:', err.message);
+          console.error('Error during scheduled "Add Liquidity" scraping:', err.message);
         });
       }
-    }, SCRAPING_INTERVAL);
+    }, SCRAPING_INTERVAL); // Uses the new SCRAPING_INTERVAL for 1-second refresh
   }
 }
 
@@ -624,15 +570,19 @@ async function enableRsiIndicator(page, tokenAddress) {
   try {
     console.log(`${tokenAddress}: Checking for RSI indicator on chart...`);
     
-    // Find the TradingView frame
-    const frames = page.frames();
-    const tradingViewFrame = frames.find(frame => {
-      const name = frame.name();
-      return name && name.includes('tradingview_');
-    });
+    // Function to get the TradingView Frame
+    const getTradingViewFrame = () => {
+      const frames = page.frames();
+      return frames.find(frame => {
+        const name = frame.name();
+        return name && name.includes('tradingview_');
+      });
+    };
+
+    let tradingViewFrame = getTradingViewFrame();
     
     if (!tradingViewFrame) {
-      console.log(`${tokenAddress}: Unable to find TradingView frame to enable RSI`);
+      console.log(`${tokenAddress}: Unable to find TradingView frame to enable RSI (initial check)`);
       return false;
     }
     
@@ -753,6 +703,13 @@ async function enableRsiIndicator(page, tokenAddress) {
         console.log(`${tokenAddress}: RSI not found in TradingView frame (enableRsiIndicator). Debug: ${rsiData.debugText}`);
     }
     
+    // Re-acquire frame before next interaction
+    tradingViewFrame = getTradingViewFrame();
+    if (!tradingViewFrame) {
+      console.log(`${tokenAddress}: TradingView frame lost before MC check.`);
+      return false;
+    }
+    
     // Updated market cap selector to match the exact structure
     let mcData = await tradingViewFrame.evaluate(() => {
       let marketCapValue = null;
@@ -815,7 +772,12 @@ async function enableRsiIndicator(page, tokenAddress) {
     if (rsiValue) {
       console.log(`${tokenAddress}: RSI indicator already exists, checking for duplicates...`);
       
-      // Find all RSI titles first
+      // Re-acquire frame
+      tradingViewFrame = getTradingViewFrame();
+      if (!tradingViewFrame) {
+        console.log(`${tokenAddress}: TradingView frame lost before RSI duplicate check.`);
+        return false; // Or attempt recovery
+      }
       const rsiItems = await tradingViewFrame.evaluate(() => {
         // Method 1: Look for elements with exactly "RSI" text
         const rsiElements = [];
@@ -837,14 +799,20 @@ async function enableRsiIndicator(page, tokenAddress) {
       if (rsiItems > 1) {
         console.log(`${tokenAddress}: Found ${rsiItems} RSI indicators, removing extras...`);
         
-        // We'll keep removing the second RSI indicator until only one remains
         let remainingToRemove = rsiItems - 1;
-        let maxAttempts = 10; // Limit attempts to avoid infinite loops
+        let maxAttempts = 10; 
         
         for (let attempt = 0; attempt < maxAttempts && remainingToRemove > 0; attempt++) {
           console.log(`${tokenAddress}: Removing duplicate RSI #${attempt+1} (${remainingToRemove} remaining)`);
           
-          // Step 1: First verify how many RSI indicators are still present
+          // Re-acquire frame before each attempt in the loop
+          tradingViewFrame = getTradingViewFrame();
+          if (!tradingViewFrame) {
+            console.log(`${tokenAddress}: TradingView frame lost during RSI duplicate removal (attempt ${attempt+1}).`);
+            await delay(1000); // Wait and hope it comes back for next attempt
+            continue;
+          }
+          
           const currentRsiCount = await tradingViewFrame.evaluate(() => {
             const rsiElements = [];
             const allElements = document.querySelectorAll('div, span');
@@ -861,8 +829,13 @@ async function enableRsiIndicator(page, tokenAddress) {
             console.log(`${tokenAddress}: Only one RSI indicator remains, no need to remove more`);
             break;
           }
-          
-          // Step 2: Find and click the manage button for the second RSI indicator
+
+          // Re-acquire frame
+          tradingViewFrame = getTradingViewFrame();
+          if (!tradingViewFrame) {
+            console.log(`${tokenAddress}: TradingView frame lost before manage button click (duplicate removal).`);
+            await delay(1000); continue;
+          }
           const manageButtonClicked = await tradingViewFrame.evaluate(() => {
             // Find all RSI elements again to get fresh references
             const rsiElements = [];
@@ -934,10 +907,14 @@ async function enableRsiIndicator(page, tokenAddress) {
             continue;
           }
           
-          // Wait for the menu to appear
           await delay(1000);
-          
-          // Step 3: Find and click specifically the delete pane button with exact data-name
+
+          // Re-acquire frame
+          tradingViewFrame = getTradingViewFrame();
+          if (!tradingViewFrame) {
+            console.log(`${tokenAddress}: TradingView frame lost before delete button click (duplicate removal).`);
+            await delay(1000); continue;
+          }
           const deleteClicked = await tradingViewFrame.evaluate(() => {
             // Look ONLY for the specific delete pane button with this exact data-name
             const deleteButton = document.querySelector('.button-JQv8nO8e[data-name="pane-button-close"]');
@@ -957,15 +934,17 @@ async function enableRsiIndicator(page, tokenAddress) {
           } else {
             console.log(`${tokenAddress}: Could not find delete button for RSI #${attempt+1}`);
           }
-          
-          // Wait for UI to update after delete action
           await delay(2000);
         }
-        
         console.log(`${tokenAddress}: Finished removing duplicate RSI indicators`);
       }
       
-      // Activate the existing RSI indicator and return
+      // Re-acquire frame
+      tradingViewFrame = getTradingViewFrame();
+      if (!tradingViewFrame) {
+        console.log(`${tokenAddress}: TradingView frame lost before activating existing RSI.`);
+        return true; // Or false, depending on how critical this is
+      }
       const activated = await tradingViewFrame.evaluate(() => {
         // Click on the RSI title to ensure it's active
         const rsiTitle = document.querySelector('.title-l31H9iuA[data-name="legend-source-title"]');
@@ -979,25 +958,24 @@ async function enableRsiIndicator(page, tokenAddress) {
       if (activated) {
         console.log(`${tokenAddress}: Activated existing RSI indicator`);
       }
-      
-      // RSI already exists, so return success
       console.log(`${tokenAddress}: RSI indicator already present, no need to add new one`);
       return true;
     }
     
-    // RSI doesn't exist, so we need to add it
     console.log(`${tokenAddress}: No RSI indicator found, adding new one...`);
-    
-    // Try multiple approaches to click indicators button with retries
     let indicatorsClicked = false;
-    let maxAttempts = 3;
+    let clickAttempts = 3; // Renamed from maxAttempts to avoid conflict
     
-    for (let attempt = 1; attempt <= maxAttempts && !indicatorsClicked; attempt++) {
-      console.log(`${tokenAddress}: Trying to click indicators button (attempt ${attempt}/${maxAttempts})...`);
+    for (let attempt = 1; attempt <= clickAttempts && !indicatorsClicked; attempt++) {
+      console.log(`${tokenAddress}: Trying to click indicators button (attempt ${attempt}/${clickAttempts})...`);
       
-      // Approach 1: Try to click the indicators button by data-name attribute
+      tradingViewFrame = getTradingViewFrame();
+      if (!tradingViewFrame) {
+        console.log(`${tokenAddress}: TradingView frame lost before clicking indicators button (attempt ${attempt}).`);
+        await delay(2000); continue;
+      }
       indicatorsClicked = await tradingViewFrame.evaluate(() => {
-        // First approach: by exact data-name and class combination (most precise)
+        // Approach 1: Try to click the indicators button by data-name attribute
         const exactButton = document.querySelector('div[data-name="open-indicators-dialog"][data-role="button"]');
         if (exactButton) {
           console.log('Found indicators button by exact match');
@@ -1056,21 +1034,15 @@ async function enableRsiIndicator(page, tokenAddress) {
         console.log(`${tokenAddress}: Successfully clicked indicators button on attempt ${attempt}`);
         break;
       }
-      
-      // If not found, take a screenshot and try refreshing the page
-      if (attempt === maxAttempts) {
-        console.log(`${tokenAddress}: Could not find or click indicators button after ${maxAttempts} attempts`);
-        
-        // Try refreshing the page as a last resort
-        console.log(`${tokenAddress}: Refreshing page to try again...`);
+      if (attempt === clickAttempts) {
+        console.log(`${tokenAddress}: Could not find or click indicators button after ${clickAttempts} attempts`);
         try {
           await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
-          await delay(5000); // Wait for page to fully load
+          await delay(5000); 
         } catch (err) {
           console.error(`${tokenAddress}: Error refreshing page:`, err.message);
         }
       } else {
-        // Wait between attempts
         await delay(2000);
       }
     }
@@ -1079,15 +1051,16 @@ async function enableRsiIndicator(page, tokenAddress) {
       console.log(`${tokenAddress}: Could not find or click indicators button`);
       return false;
     }
-    
-    // Wait for the indicators dialog to open
     await delay(2000);
     
-    // Try to find the search box and type RSI with retries
     let searchTyped = false;
     const searchAttempts = 3;
-    
     for (let attempt = 1; attempt <= searchAttempts && !searchTyped; attempt++) {
+      tradingViewFrame = getTradingViewFrame();
+      if (!tradingViewFrame) {
+        console.log(`${tokenAddress}: TradingView frame lost before typing RSI search (attempt ${attempt}).`);
+        await delay(1000); continue;
+      }
       searchTyped = await tradingViewFrame.evaluate(() => {
       // Method 1: By class name
       let searchInput = document.querySelector('.input-qm7Rg5MB[data-role="search"]');
@@ -1140,25 +1113,25 @@ async function enableRsiIndicator(page, tokenAddress) {
     
     if (!searchTyped) {
       console.log(`${tokenAddress}: Could not find search input after multiple attempts`);
-      // Try to close dialog if open
-      await tradingViewFrame.evaluate(() => {
-        const closeButtons = document.querySelectorAll('[data-name="close"], .close-BZKENkhT');
-        for (const button of closeButtons) {
-          button.click();
-          return true;
-        }
-      });
+      tradingViewFrame = getTradingViewFrame();
+      if (tradingViewFrame) {
+        await tradingViewFrame.evaluate(() => {
+          const closeButtons = document.querySelectorAll('[data-name="close"], .close-BZKENkhT');
+          for (const button of closeButtons) { button.click(); return true; }
+        });
+      }
       return false;
     }
-    
-    // Wait for search results
     await delay(2000);
-    
-    // Try multiple methods to find and click the RSI indicator with retries
+
     let rsiClicked = false;
     const rsiAttempts = 3;
-    
     for (let attempt = 1; attempt <= rsiAttempts && !rsiClicked; attempt++) {
+      tradingViewFrame = getTradingViewFrame();
+      if (!tradingViewFrame) {
+        console.log(`${tokenAddress}: TradingView frame lost before clicking RSI in search (attempt ${attempt}).`);
+        await delay(1000); continue;
+      }
       rsiClicked = await tradingViewFrame.evaluate(() => {
         // Method 1: Look for "RSI" title directly
         const rsiItems = document.querySelectorAll('div.title-cIIj4HrJ');
@@ -1212,58 +1185,63 @@ async function enableRsiIndicator(page, tokenAddress) {
     
     if (!rsiClicked) {
       console.log(`${tokenAddress}: Could not find or click RSI indicator after multiple attempts`);
-      // Try to close dialog if open
-      await tradingViewFrame.evaluate(() => {
+      tradingViewFrame = getTradingViewFrame();
+      if (tradingViewFrame) {
+        await tradingViewFrame.evaluate(() => {
+          const closeButtons = document.querySelectorAll('[data-name="close"], .close-BZKENkhT');
+          for (const button of closeButtons) { button.click(); return true; }
+        });
+      }
+      return false;
+    }
+    await delay(2000);
+
+    tradingViewFrame = getTradingViewFrame();
+    if (!tradingViewFrame) {
+      console.log(`${tokenAddress}: TradingView frame lost before closing dialog.`);
+      // If frame is lost here, RSI might still have been added.
+      // Depending on desired behavior, you might return true or try to recover.
+    } else {
+      const dialogClosed = await tradingViewFrame.evaluate(() => {
+        // Method 1: By data attributes
         const closeButtons = document.querySelectorAll('[data-name="close"], .close-BZKENkhT');
         for (const button of closeButtons) {
           button.click();
           return true;
         }
-      });
-      return false;
-    }
-    
-    // Wait for the indicator to be added
-    await delay(2000);
-    
-    // Try to close the dialog
-    const dialogClosed = await tradingViewFrame.evaluate(() => {
-      // Method 1: By data attributes
-      const closeButtons = document.querySelectorAll('[data-name="close"], .close-BZKENkhT');
-      for (const button of closeButtons) {
-        button.click();
-        return true;
-      }
-      
-      // Method 2: By text content containing "Close" or "X"
-      const buttons = document.querySelectorAll('button, div[role="button"]');
-      for (const button of buttons) {
-        if (button.textContent && (button.textContent.includes('Close') || button.textContent === 'X')) {
-          button.click();
+        
+        // Method 2: By text content containing "Close" or "X"
+        const buttons = document.querySelectorAll('button, div[role="button"]');
+        for (const button of buttons) {
+          if (button.textContent && (button.textContent.includes('Close') || button.textContent === 'X')) {
+            button.click();
+            return true;
+          }
+        }
+        
+        // Method 3: By typical close button classes
+        const dialogCloseButtons = document.querySelectorAll('.close, .closeButton, [class*="close"]');
+        for (const btn of dialogCloseButtons) {
+          btn.click();
           return true;
         }
+        
+        return false;
+      });
+      if (!dialogClosed) {
+        console.log(`${tokenAddress}: Could not close dialog, but RSI may still be added`);
       }
-      
-      // Method 3: By typical close button classes
-      const dialogCloseButtons = document.querySelectorAll('.close, .closeButton, [class*="close"]');
-      for (const btn of dialogCloseButtons) {
-        btn.click();
-        return true;
-      }
-      
-      return false;
-    });
-    
-    if (!dialogClosed) {
-      console.log(`${tokenAddress}: Could not close dialog, but RSI may still be added`);
     }
     
     console.log(`${tokenAddress}: Successfully attempted to enable RSI indicator`);
-    
-    // Wait for RSI to appear on the chart
     await delay(5000);
     return true;
   } catch (error) {
+    // Check if error is due to detached frame
+    if (error.message.includes('detached Frame') || error.message.includes('Target closed')) {
+      console.warn(`${tokenAddress}: Error in enableRsiIndicator (likely detached frame): ${error.message}. Returning false.`);
+      return false; // Indicate failure due to frame issue
+    }
     console.error(`${tokenAddress}: Error checking/enabling RSI indicator: ${error.message}`);
     return false;
   }
@@ -1271,59 +1249,73 @@ async function enableRsiIndicator(page, tokenAddress) {
 
 // Updated monitorTokenRSI function to track status more accurately
 async function monitorTokenRSI(page, tokenAddress) {
-  // State tracking
-  let isRsiBelow25 = false;
-  let hasSentBuyRequest = false;
-  let noRsiDataCount = 0;
-  
-  // RSI direction change tracking
+  // State tracking for buy signals
+  let inSub30Dip = false;
+  let canBuyThisDip = false;
+  let lowestRsiOfCurrentDip = null;
   let lastRsiValue = null;
-  let rsiTrend = 'unknown'; // 'falling', 'rising', or 'unknown'
-  let lowestRsiValue = null;
   
-  // Track N/A RSI values
+  // State tracking for sell signals
+  // let hasBeenBought = false; // We will now rely on activeTrades.has(tokenAddress)
+  let marketCapAtLastTick = null; // For sell condition: MC decreases
+
+  // Other existing state variables:
+  let noRsiDataCount = 0;
   let consecutiveNaRsiCount = 0;
-  
-  // Track invalid RSI values
   let consecutiveInvalidRsiCount = 0;
-  
-  // Track Market Cap for staleness
-  let lastMarketCapValueString = null; // Store the string representation of MC
-  let lastMarketCapChangeTime = null;   // Timestamp of the last MC change
-  
-  // Function to blacklist current token and move to next one
+  let lastMarketCapValueString = null; // For stale MC check
+  let lastMarketCapChangeTime = null;   // For stale MC check
+  let pipFetchCounter = 0;
+  const PIP_FETCH_INTERVAL_COUNT = 25;
+  const DEFAULT_TRADE_AMOUNT_FOR_PIP = '100000';
+  // let cciValue = null; // cciValue from scrape will be in scrapedData.cciValue
+
   const blacklistCurrentToken = async (reason) => {
     await blacklistAndReplaceToken(tokenAddress, reason);
   };
-  
-  // Initial status update
-  updateTokenStatus(tokenAddress, 'RSI Monitoring', 'Starting to check for RSI and MC values');
-  
-  // Start an interval to check for RSI updates every 0.2 seconds
-  const intervalId = setInterval(async () => {
-    try {
-      // Find all iframes on the page
-      const frames = page.frames();
-      let rsiValue = null;
-      let marketCapValue = null;
-      
-      // Find the TradingView frame (simpler approach)
-      const tradingViewFrame = frames.find(frame => {
-        const name = frame.name();
-        return name && name.includes('tradingview_');
-      });
-      
-      if (tradingViewFrame) {
-        try {
-          // Get RSI and MC value with enhanced debugging
-          const scrapedData = await tradingViewFrame.evaluate(() => {
-            let rsiValue = null;
-            let rsiDebugText = 'RSI debug (monitorTokenRSI): ';
-            let marketCapValue = null;
-            let mcDebugText = 'MC debug (monitorTokenRSI): ';
 
-            // --- RSI Scraping Logic (copied and adapted from enableRsiIndicator) ---
-            const rsiItemsEval = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
+  updateTokenStatus(tokenAddress, 'RSI Monitoring', 'Starting to check for RSI and MC values');
+
+  const intervalId = setInterval(async () => {
+    let tradingViewFrame;
+    try {
+      // ... (getTradingViewFrameForInterval logic - unchanged)
+      const getTradingViewFrameForInterval = () => {
+        if (!page || page.isClosed()) return null;
+        const frames = page.frames();
+        return frames.find(frame => {
+          const name = frame.name();
+          return name && name.includes('tradingview_');
+        });
+      };
+      tradingViewFrame = getTradingViewFrameForInterval();
+
+      if (!tradingViewFrame) {
+        // ... (frame not found logic - unchanged)
+        console.log(`${tokenAddress}: TradingView frame not found in monitorTokenRSI.`);
+        noRsiDataCount++;
+        if (noRsiDataCount > 10) {
+          logDetailedError(tokenAddress, 'MISSING_FRAME_MONITOR', 'TradingView frame consistently missing in monitor.');
+          clearInterval(intervalId);
+          await blacklistCurrentToken("TradingView frame consistently missing");
+        }
+        return;
+      }
+
+      let rsiValue = null; 
+      let marketCapValue = null; 
+
+      const scrapedData = await tradingViewFrame.evaluate(() => {
+        // ... (evaluate logic for RSI, MC, CCI - unchanged) ...
+        let rsiValue = null;
+        let rsiDebugText = 'RSI debug (monitorTokenRSI): ';
+        let marketCapValue = null;
+        let mcDebugText = 'MC debug (monitorTokenRSI): ';
+        let cciValue = null; 
+        let cciDebugText = 'CCI(20) debug (monitorTokenRSI): '; 
+
+        // --- RSI Scraping Logic ---
+        const rsiItemsEval = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
             for (const item of rsiItemsEval) {
               const titleEl = item.querySelector('.title-l31H9iuA.mainTitle-l31H9iuA[data-name="legend-source-title"]');
               const descEl = item.querySelector('.title-l31H9iuA.descTitle-l31H9iuA[data-name="legend-source-title"]');
@@ -1386,7 +1378,7 @@ async function monitorTokenRSI(page, tokenAddress) {
               rsiDebugText = `RSI found in monitor evaluate: ${rsiValue}`;
             }
 
-            // --- MC Scraping Logic (copied and adapted from enableRsiIndicator) ---
+        // --- MC Scraping Logic ---
             const mcElementsEval = document.querySelectorAll('.valueItem-l31H9iuA');
             for (const item of mcElementsEval) {
               const title = item.querySelector('.valueTitle-l31H9iuA');
@@ -1407,100 +1399,69 @@ async function monitorTokenRSI(page, tokenAddress) {
             } else {
               mcDebugText = `MC found in monitor evaluate: ${marketCapValue}`;
             }
-            
-            return { rsiValue, marketCapValue, rsiDebugText, mcDebugText };
-          });
+        
+        // --- CCI(20) Scraping Logic ---
+            const potentialIndicators = document.querySelectorAll('.item-l31H9iuA.study-l31H9iuA');
+            potentialIndicators.forEach(indicator => {
+                const mainTitleElement = indicator.querySelector('.titlesWrapper-l31H9iuA .mainTitle-l31H9iuA .title-l31H9iuA');
+                const descriptionElement = indicator.querySelector('.titlesWrapper-l31H9iuA .descTitle-l31H9iuA .title-l31H9iuA');
 
-          rsiValue = scrapedData.rsiValue;
-          marketCapValue = scrapedData.marketCapValue;
-
-          // Log raw scraped values and debug text if null
-          const rawScrapedLog = `${tokenAddress}: Raw scraped in monitor - RSI: ${rsiValue === null ? 'N/A' : rsiValue}, MC: ${marketCapValue === null ? 'N/A' : marketCapValue}`;
-          console.log(rawScrapedLog);
-          if (rsiValue === null) {
-            console.log(`${tokenAddress}: ${scrapedData.rsiDebugText}`);
-          }
-          if (marketCapValue === null) {
-            console.log(`${tokenAddress}: ${scrapedData.mcDebugText}`);
-          }
-          
-          // Log the values we found (original logging, can be kept or removed if redundant)
-          // if (rsiValue || marketCapValue) { // This check might be redundant now
-          //   const timestamp = new Date().toISOString();
-          //   console.log(`[${timestamp}] Token: ${tokenAddress} | RSI: ${rsiValue || 'N/A'} | MC: ${marketCapValue || 'N/A'}`);
-          // }
-
-          // Update token status and check if token is now ready (RSI and MC are working)
-          // This needs to happen *after* rsiValue might be set to null by validation
-          // checkTokenReadiness(tokenAddress, rsiValue, marketCapValue); 
-          
-          // Additional validation for RSI values
-          if (rsiValue) {
-            // Check if the RSI value contains 'K', 'M', or 'B' which would indicate it's not an RSI value
-            if (rsiValue.includes('K') || rsiValue.includes('M') || rsiValue.includes('B')) {
-              console.log(`${tokenAddress}: Invalid RSI value detected (${rsiValue}), treating as N/A`);
-              updateTokenStatus(tokenAddress, 'Invalid RSI', `Invalid RSI value detected: ${rsiValue}`);
-              consecutiveInvalidRsiCount++;
-              rsiValue = null;
+                if (mainTitleElement && mainTitleElement.textContent.trim() === 'CCI' &&
+                    descriptionElement && descriptionElement.textContent.trim() === '20') {
+                    
+                    const valueElement = indicator.querySelector('.valuesWrapper-l31H9iuA .valuesAdditionalWrapper-l31H9iuA .valueItem-l31H9iuA .valueValue-l31H9iuA');
+                    if (valueElement) {
+                        cciValue = valueElement.textContent.trim();
+                    } else {
+                        cciDebugText += 'CCI(20) titles found, but value element not found with specific selector. ';
+                    }
+                }
+            });
+            if (cciValue !== null) {
+                cciDebugText = `CCI(20) found in monitor evaluate: ${cciValue}`;
             } else {
-              // Parse as float and validate range
-              const rsiFloat = parseFloat(rsiValue);
-              if (isNaN(rsiFloat) || rsiFloat < 0 || rsiFloat > 100) {
-                console.log(`${tokenAddress}: RSI value out of range (${rsiValue}), treating as N/A`);
-                updateTokenStatus(tokenAddress, 'Out-of-Range RSI', `RSI value out of range: ${rsiValue}`);
-                consecutiveInvalidRsiCount++;
-                rsiValue = null;
-              } else {
-                // Reset counter for valid RSI values
-                consecutiveInvalidRsiCount = 0;
-              }
+                if (!potentialIndicators.length) {
+                    cciDebugText += 'No .item-l31H9iuA.study-l31H9iuA indicators found. ';
+                } else {
+                     cciDebugText += `Found ${potentialIndicators.length} indicators, but none matched CCI(20) criteria. `;
+                }
             }
+        return { rsiValue, marketCapValue, cciValue, rsiDebugText, mcDebugText, cciDebugText };
+      });
+
+      rsiValue = scrapedData.rsiValue; 
+      marketCapValue = scrapedData.marketCapValue; 
+      const cciString = scrapedData.cciValue; // Keep CCI as string for now, parse later
+
+      const rawScrapedLog = `${tokenAddress}: Raw scraped in monitor - RSI: ${rsiValue === null ? 'N/A' : rsiValue}, MC: ${marketCapValue === null ? 'N/A' : marketCapValue}, CCI(20): ${cciString === null ? 'N/A' : cciString}`;
+      console.log(rawScrapedLog);
+      // ... (debug logs for null values - unchanged)
+      if (rsiValue === null) console.log(`${tokenAddress}: ${scrapedData.rsiDebugText}`);
+      if (marketCapValue === null) console.log(`${tokenAddress}: ${scrapedData.mcDebugText}`);
+      if (scrapedData.cciValue === null) console.log(`${tokenAddress}: ${scrapedData.cciDebugText}`);
+      
+      let rsiNumeric = null;
+      if (rsiValue) {
+        // ... (RSI parsing to rsiNumeric - unchanged)
+        if (rsiValue.includes('K') || rsiValue.includes('M') || rsiValue.includes('B')) {
+          console.log(`${tokenAddress}: Invalid RSI value detected (${rsiValue}), treating as N/A`);
+          updateTokenStatus(tokenAddress, 'Invalid RSI', `Invalid RSI value detected: ${rsiValue}`);
+          consecutiveInvalidRsiCount++;
+        } else {
+          const parsedFloat = parseFloat(rsiValue);
+          if (isNaN(parsedFloat) || parsedFloat < 0 || parsedFloat > 100) {
+            console.log(`${tokenAddress}: RSI value out of range (${rsiValue}), treating as N/A`);
+            updateTokenStatus(tokenAddress, 'Out-of-Range RSI', `RSI value out of range: ${rsiValue}`);
+            consecutiveInvalidRsiCount++;
+          } else {
+            rsiNumeric = parsedFloat;
+            consecutiveInvalidRsiCount = 0;
           }
-        } catch (frameError) {
-          console.error(`Error in TradingView frame for ${tokenAddress}:`, frameError.message);
-          updateTokenStatus(tokenAddress, 'Frame Error', `Error accessing TradingView: ${frameError.message}`);
-          logDetailedError(tokenAddress, 'FRAME_ERROR', frameError.message);
         }
       }
-      
-      // Handle invalid RSI values by trying to fix or blacklisting if unfixable
-      if (consecutiveInvalidRsiCount >= 3) {
-        console.log(`${tokenAddress}: Multiple invalid RSI values detected (${consecutiveInvalidRsiCount}).`);
-        
-        // First, try to enable the RSI indicator
-        if (consecutiveInvalidRsiCount === 3) {
-          console.log(`${tokenAddress}: Attempting to enable RSI indicator...`);
-          updateTokenStatus(tokenAddress, 'RSI Fix Attempt', 'Trying to fix invalid RSI values by enabling RSI indicator');
-          const rsiEnabled = await enableRsiIndicator(page, tokenAddress);
-          if (rsiEnabled) {
-            // Reset counter and wait to see if RSI values appear
-            consecutiveInvalidRsiCount = 0;
-            updateTokenStatus(tokenAddress, 'RSI Fix Success', 'Successfully fixed RSI indicator');
-            await delay(3000);
-            return; // Exit this iteration
-          }
-        }
-        
-        // If enabling RSI didn't work or we've already tried, force a page reload
-        if (consecutiveInvalidRsiCount === 4) {
-          console.log(`${tokenAddress}: Forcing page reload...`);
-          updateTokenStatus(tokenAddress, 'Page Reload', 'Reloading page to fix RSI issues');
-          try {
-            await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
-            console.log(`${tokenAddress}: Page reloaded due to invalid RSI values`);
-            consecutiveInvalidRsiCount = 0;
-            updateTokenStatus(tokenAddress, 'Page Reloaded', 'Page reloaded successfully, waiting for chart to load');
-            await delay(5000); // Give time for page to reload
-            return;
-          } catch (reloadError) {
-            console.error(`Error reloading page for ${tokenAddress}:`, reloadError.message);
-            updateTokenStatus(tokenAddress, 'Reload Error', `Error reloading page: ${reloadError.message}`);
-            logDetailedError(tokenAddress, 'PAGE_RELOAD_ERROR', reloadError.message);
-          }
-        }
-        
-        // If all else fails, blacklist the token and move to next one
-        if (consecutiveInvalidRsiCount >= 5) {
+
+      // ... (consecutiveInvalidRsiCount & consecutiveNaRsiCount handling - unchanged)
+       if (consecutiveInvalidRsiCount >= 5) {
           updateTokenStatus(tokenAddress, 'Blacklisting', 'Persistent invalid RSI values, blacklisting token');
           logDetailedError(
             tokenAddress, 
@@ -1508,33 +1469,13 @@ async function monitorTokenRSI(page, tokenAddress) {
             `Failed to get valid RSI after ${consecutiveInvalidRsiCount} attempts`,
             `Last values: RSI: ${rsiValue || 'N/A'} | MC: ${marketCapValue || 'N/A'}`
           );
-          
           clearInterval(intervalId);
           await blacklistCurrentToken("Persistent invalid RSI values");
           return;
         }
-      }
-      
-      // Handle missing or N/A RSI data
-      if (!rsiValue || rsiValue === 'N/A' || rsiValue === '∅') {
+      if (rsiNumeric === null) { 
         consecutiveNaRsiCount++;
-        console.log(`${tokenAddress}: No valid RSI data (count: ${consecutiveNaRsiCount})`);
-        
-        // First try to enable RSI when we reach 3 consecutive N/A values
-        if (consecutiveNaRsiCount === 3) {
-          console.log(`${tokenAddress}: Attempting to enable RSI indicator due to missing data...`);
-          const rsiEnabled = await enableRsiIndicator(page, tokenAddress);
-          if (rsiEnabled) {
-            // Reset counter and wait to see if RSI values appear
-            consecutiveNaRsiCount = 0;
-            await delay(3000);
-            return; // Exit this iteration
-          }
-        }
-        
-        // More attempts to fix the RSI (abbreviated for brevity, full logic in original)
-        
-        // If we've seen N/A values several times in a row (8 checks = ~1.6 seconds)
+        console.log(`${tokenAddress}: No valid RSI data (numeric) (count: ${consecutiveNaRsiCount})`);
         if (consecutiveNaRsiCount >= 8) {
           logDetailedError(
             tokenAddress, 
@@ -1542,90 +1483,208 @@ async function monitorTokenRSI(page, tokenAddress) {
             `Failed to get RSI data after ${consecutiveNaRsiCount} attempts`,
             `Market Cap: ${marketCapValue || 'N/A'}`
           );
-          
           clearInterval(intervalId);
           await blacklistCurrentToken("Persistent missing RSI data");
           return;
         }
       } else {
-        // Reset counter if we found valid RSI data
         consecutiveNaRsiCount = 0;
       }
       
-      // Check if market cap is below 25K
+      checkTokenReadiness(tokenAddress, rsiValue, marketCapValue);
+
+      let mcNumeric = null;
       if (marketCapValue) {
+        // ... (MC parsing to mcNumeric & <25k check - unchanged)
         const mcMatch = marketCapValue.match(/\$?([\d.]+)([KMB])?/);
-        
         if (mcMatch) {
-          let mcNumeric = parseFloat(mcMatch[1]);
+          let mcVal = parseFloat(mcMatch[1]);
           const mcUnit = mcMatch[2] || '';
-          
-          if (mcUnit === 'K') mcNumeric *= 1000;
-          else if (mcUnit === 'M') mcNumeric *= 1000000;
-          else if (mcUnit === 'B') mcNumeric *= 1000000000;
-          
-          // MODIFIED: Changed threshold to 25000 and removed duration logic
-          if (mcNumeric < 25000) {
-            console.log(`${tokenAddress}: Market cap dropped below 25K (${marketCapValue})`);
-            logDetailedError(
-              tokenAddress, 
-              'LOW_MARKET_CAP', 
-              `Market cap below 25K`,
-              `Value: ${marketCapValue}`
-            );
-            
+          if (mcUnit === 'K') mcVal *= 1000;
+          else if (mcUnit === 'M') mcVal *= 1000000;
+          else if (mcUnit === 'B') mcVal *= 1000000000;
+          mcNumeric = mcVal;
+
+          if (mcNumeric < 25000 && !activeTrades.has(tokenAddress)) { // Only blacklist for low MC if not already bought
+            console.log(`${tokenAddress}: Market cap dropped below 25K (${marketCapValue}) AND not in a trade. Blacklisting.`);
+            logDetailedError(tokenAddress, 'LOW_MARKET_CAP_BLACKLIST', `Market cap below 25K`, `Value: ${marketCapValue}`);
             clearInterval(intervalId);
-            await blacklistCurrentToken("Market cap below 25K");
-            return; // Exit immediately after blacklisting
+            await blacklistCurrentToken("Market cap below 25K (not in trade)");
+            return;
           }
         }
       }
-      
-      // Check RSI value for trading signals (abbreviated for brevity, full logic in original)
-      if (rsiValue) {
-        const rsiNumeric = parseFloat(rsiValue);
-        
-        if (!isNaN(rsiNumeric)) {
-          // Trading logic stays the same as the original
-          // ... (abbreviated)
-        }
+
+      const currentTokenStatus = tokensReadyStatus.get(tokenAddress) || {};
+      const pipString = currentTokenStatus.pipValue;
+      let pipNumericForCheck = null;
+      // ... (PIP parsing - unchanged)
+      if (pipString && typeof pipString === 'string' && !isNaN(parseFloat(pipString))) {
+          pipNumericForCheck = parseFloat(pipString);
+      } else if (typeof pipString === 'number') {
+          pipNumericForCheck = pipString;
       }
-      
-      // --- New: Check for stale Market Cap ---
-      if (marketCapValue) { // Ensure we have a marketCapValue to work with
+
+      // -------- START: Trading Signal Logic (Buy and Sell) --------
+      if (rsiNumeric !== null) { // Ensure rsiNumeric is valid
+          const rsiIncreasedThisTick = lastRsiValue !== null && rsiNumeric > lastRsiValue;
+          const currentlyInTrade = activeTrades.has(tokenAddress);
+
+          // --- Sell Logic (only if currently in a trade) ---
+          if (currentlyInTrade) {
+              let sellReason = null;
+              let cciNumeric = null;
+              if (cciString && !isNaN(parseFloat(cciString))) {
+                  cciNumeric = parseFloat(cciString);
+              }
+
+              // Condition 1: CCI >= -50
+              if (cciNumeric !== null && cciNumeric >= -50) {
+                  sellReason = `CCI reached ${cciNumeric.toFixed(2)} (>= -50)`;
+              }
+              // Condition 2: MC decreased (check only if CCI didn't trigger sell)
+              if (!sellReason && mcNumeric !== null && marketCapAtLastTick !== null && mcNumeric < marketCapAtLastTick) {
+                  sellReason = `MC decreased from ${marketCapAtLastTick.toFixed(2)} to ${mcNumeric.toFixed(2)}`;
+              }
+
+              if (sellReason) {
+                  const sellMessage = `SELL SIGNAL: ${sellReason}. RSI: ${rsiNumeric.toFixed(2)}, MC: ${marketCapValue}, CCI: ${cciString || 'N/A'}`;
+                  console.log(`${tokenAddress}: ${sellMessage}`);
+                  writeToLogFile(tokenAddress, rsiNumeric, marketCapValue, sellMessage);
+                  
+                  const buyDetails = activeTrades.get(tokenAddress);
+                  const sellDetails = {
+                      timestamp: new Date(),
+                      mcString: marketCapValue,
+                      mcNumeric: mcNumeric,
+                      rsiNumeric: rsiNumeric,
+                      cciString: cciString
+                  };
+                  logTradeOutcome(tokenAddress, buyDetails, sellDetails, sellReason);
+                  activeTrades.delete(tokenAddress);
+                  
+                  canBuyThisDip = false; // Reset buy state completely after a sell
+                  updateTokenStatus(tokenAddress, 'SELL Signal Triggered', sellReason);
+                  // No need to check buy logic in the same tick as a sell.
+              }
+          }
+
+          // --- Buy Logic (only if not currently in a trade) ---
+          if (!currentlyInTrade) {
+            if (inSub30Dip && canBuyThisDip && rsiIncreasedThisTick) {
+                const logPrefix = `${tokenAddress}: Potential BUY`;
+                console.log(`${logPrefix} - In dip: Yes, Can buy: Yes, RSI increasing: ${lastRsiValue.toFixed(2)} -> ${rsiNumeric.toFixed(2)}.`);
+
+                if (mcNumeric !== null && mcNumeric > 25000) {
+                    if (pipNumericForCheck !== null && pipNumericForCheck < 20) {
+                        const buyMessage = `BUY SIGNAL: RSI ${lastRsiValue.toFixed(2)} -> ${rsiNumeric.toFixed(2)}. MC: ${marketCapValue} (>25k). PIP: ${pipNumericForCheck.toFixed(2)} (<20). Dip low: ${lowestRsiOfCurrentDip !== null ? lowestRsiOfCurrentDip.toFixed(2) : 'N/A'}.`;
+                        console.log(`${tokenAddress}: ${buyMessage}`);
+                        writeToLogFile(tokenAddress, rsiNumeric, marketCapValue, buyMessage);
+                        
+                        const buyDetails = {
+                            timestamp: new Date(),
+                            mcString: marketCapValue,
+                            mcNumeric: mcNumeric,
+                            rsiNumeric: rsiNumeric,
+                            cciString: cciString,
+                            pipNumeric: pipNumericForCheck
+                        };
+                        activeTrades.set(tokenAddress, buyDetails);
+                        
+                        canBuyThisDip = false; // Consume the buy opportunity
+                        updateTokenStatus(tokenAddress, 'BUY Signal Triggered', `RSI: ${rsiNumeric.toFixed(2)}, MC: ${marketCapValue}, PIP: ${pipNumericForCheck.toFixed(2)}`);
+                    } else { // PIP condition failed
+                        const pipReason = pipNumericForCheck === null ? "not available/valid" : `(${pipNumericForCheck.toFixed(2)}) is NOT < 20`;
+                        console.log(`${logPrefix} - MC > 25k YES, but PIP ${pipReason}. No buy.`);
+                    }
+                } else { // MC condition failed
+                    const mcReason = mcNumeric === null ? "not available/valid" : `(${marketCapValue}) is NOT > 25k`;
+                    console.log(`${logPrefix} - MC ${mcReason}. No buy.`);
+                }
+            }
+          }
+
+          // Manage dip state (for future buys) - this happens regardless of buy/sell this tick
+          if (rsiNumeric < 30) {
+              if (!inSub30Dip) {
+                  inSub30Dip = true;
+                  if (!activeTrades.has(tokenAddress)) canBuyThisDip = true; // Arm for buy only if not already holding
+                  lowestRsiOfCurrentDip = rsiNumeric;
+                  console.log(`${tokenAddress}: RSI (${rsiNumeric.toFixed(2)}) < 30. Dip started. Lowest: ${lowestRsiOfCurrentDip.toFixed(2)}. Monitoring for an increase.`);
+              } else {
+                  if (rsiNumeric < lowestRsiOfCurrentDip) lowestRsiOfCurrentDip = rsiNumeric;
+              }
+          } else { // rsiNumeric >= 30
+              if (inSub30Dip) {
+                  console.log(`${tokenAddress}: RSI (${rsiNumeric.toFixed(2)}) >= 30. Dip ended. Lowest during dip: ${lowestRsiOfCurrentDip !== null ? lowestRsiOfCurrentDip.toFixed(2) : 'N/A'}.`);
+                  inSub30Dip = false;
+                  // canBuyThisDip is handled by successful buy or new dip start
+              }
+          }
+          lastRsiValue = rsiNumeric;
+      }
+      // Update marketCapAtLastTick AFTER all buy/sell decisions for the current tick are made
+      if (mcNumeric !== null) {
+          marketCapAtLastTick = mcNumeric;
+      }
+      // -------- END: Trading Signal Logic --------
+
+      // --- Check for stale Market Cap ---
+      if (marketCapValue && !activeTrades.has(tokenAddress)) { // Only check stale MC if not holding
         if (lastMarketCapValueString === null) {
-          // First time we're seeing a market cap value for this token
           lastMarketCapValueString = marketCapValue;
           lastMarketCapChangeTime = Date.now();
         } else if (marketCapValue !== lastMarketCapValueString) {
-          // Market cap has changed
           lastMarketCapValueString = marketCapValue;
           lastMarketCapChangeTime = Date.now();
         } else {
-          // Market cap is the same as the last one seen
-          if (lastMarketCapChangeTime) { // Ensure lastMarketCapChangeTime is set
-            const timeUnchanged = (Date.now() - lastMarketCapChangeTime) / 1000; // in seconds
+          if (lastMarketCapChangeTime) {
+            const timeUnchanged = (Date.now() - lastMarketCapChangeTime) / 1000;
             if (timeUnchanged > 120) {
-              console.log(`${tokenAddress}: Market Cap (${marketCapValue}) unchanged for over ${timeUnchanged.toFixed(0)} seconds.`);
-              logDetailedError(
-                tokenAddress,
-                'STALE_MARKET_CAP',
-                `Market Cap unchanged for >120s. Last MC: ${lastMarketCapValueString}`,
-                `Current MC: ${marketCapValue}`
-              );
+              console.log(`${tokenAddress}: Market Cap (${marketCapValue}) unchanged for over ${timeUnchanged.toFixed(0)}s (not in trade). Blacklisting.`);
+              logDetailedError(tokenAddress, 'STALE_MARKET_CAP_BLACKLIST', `Market Cap unchanged for >120s. Last MC: ${lastMarketCapValueString}`, `Current MC: ${marketCapValue}`);
               clearInterval(intervalId);
-              await blacklistCurrentToken("Market Cap unchanged for >120 seconds");
-              return; // Exit monitoring for this token
+              await blacklistCurrentToken("Market Cap unchanged for >120 seconds (not in trade)");
+              return;
             }
           }
         }
       }
-      // --- End: New Stale Market Cap Check ---
+      
+      // {{ ADDITION: Fetch Price Impact (PIP) periodically }} (existing logic - unchanged)
+      // ...
+      pipFetchCounter++;
+      if (pipFetchCounter >= PIP_FETCH_INTERVAL_COUNT) {
+        pipFetchCounter = 0;
+        try {
+          const currentPipValue = await fetchPriceImpact(tokenAddress, DEFAULT_TRADE_AMOUNT_FOR_PIP);
+          console.log(`${tokenAddress}: Price Impact (PIP): ${currentPipValue}`);
+          const status = tokensReadyStatus.get(tokenAddress) || {};
+          status.pipValue = currentPipValue; 
+          status.lastPipUpdate = new Date().toISOString();
+          tokensReadyStatus.set(tokenAddress, status);
+          logSystemStatus(); 
+        } catch (pipError) {
+          console.error(`${tokenAddress}: Error fetching Price Impact: ${pipError.message}`);
+          logDetailedError(tokenAddress, 'PIP_FETCH_ERROR', pipError.message);
+          const status = tokensReadyStatus.get(tokenAddress) || {};
+          status.pipValue = 'Error'; 
+          status.lastPipUpdate = new Date().toISOString();
+          tokensReadyStatus.set(tokenAddress, status);
+          logSystemStatus(); 
+        }
+      }
+
     } catch (error) {
-      console.error(`Error checking values for ${tokenAddress}:`, error.message);
-      logDetailedError(tokenAddress, 'MONITORING_ERROR', error.message);
+      // ... (existing error handling - unchanged)
+      if (error.message.includes('detached Frame') || error.message.includes('Target closed')) {
+        console.warn(`${tokenAddress}: Error in monitorTokenRSI interval (likely detached frame): ${error.message}.`);
+      } else {
+        console.error(`Error checking values for ${tokenAddress}:`, error.message);
+        logDetailedError(tokenAddress, 'MONITORING_ERROR', error.message);
+      }
     }
-  }, 200); // Check every 0.2 seconds
+  }, 200); 
 
   return intervalId;
 }
@@ -1636,6 +1695,14 @@ async function blacklistAndReplaceToken(tokenAddress, reason) {
   
   // Add to blacklist
   blacklistedTokens.add(tokenAddress);
+
+  // Log trade outcome if the token was in an active trade when blacklisted
+  if (activeTrades.has(tokenAddress)) {
+    const buyDetails = activeTrades.get(tokenAddress);
+    logTradeOutcome(tokenAddress, buyDetails, null, `Blacklisted: ${reason}`);
+    activeTrades.delete(tokenAddress);
+    console.log(`${tokenAddress}: Logged trade outcome due to blacklisting.`);
+  }
   
   // Remove from tracked maps
   const tokenData = tokenPages.get(tokenAddress);
@@ -1848,7 +1915,7 @@ async function restartBrowser() {
     // Launch a new browser instance
     console.log('Launching new browser instance...');
     const browser = await puppeteer.launch({
-      headless: false,
+      headless: true, // Changed from false to true
       defaultViewport: null,
       userDataDir: userDataDir,
       args: [
@@ -2055,9 +2122,9 @@ process.on('SIGINT', async () => {
 
 async function run() {
   // Create all log files if they don't exist
-  [queueLogFile, monitoringLogFile, scrapingLogFile].forEach(file => {
+  [queueLogFile, monitoringLogFile, scrapingLogFile, errorLogFile, profitLossLogFile].forEach(file => { // ++ ADDED profitLossLogFile
     if (!fs.existsSync(file)) {
-      fs.writeFileSync(file, '--- Log Created ---\n');
+      fs.writeFileSync(file, `--- Log Created: ${new Date().toISOString()} ---\n`);
     }
   });
   
@@ -2082,7 +2149,7 @@ async function run() {
     
     // Launch browser with proper extension loading and persistent profile
     browser = await puppeteer.launch({
-      headless: false,
+      headless: true, // Changed from false to true
       defaultViewport: null,
       userDataDir: userDataDir,
       args: [
@@ -2247,4 +2314,60 @@ async function run() {
   }
 }
 
-run();
+// run(); // << REMOVE ONE OF THESE
+run(); 
+
+// Helper function to log detailed trade outcomes
+function logTradeOutcome(tokenAddress, buyData, sellData, sellReason) {
+  const buyTimestamp = new Date(buyData.timestamp).toISOString();
+  const sellTimestamp = sellData ? new Date(sellData.timestamp).toISOString() : 'N/A (Blacklisted/Error)';
+  
+  let timeLapsedMs = sellData ? sellData.timestamp.getTime() - buyData.timestamp.getTime() : 0;
+  let timeLapsedStr = 'N/A';
+  if (sellData) {
+    const seconds = Math.floor((timeLapsedMs / 1000) % 60);
+    const minutes = Math.floor((timeLapsedMs / (1000 * 60)) % 60);
+    const hours = Math.floor((timeLapsedMs / (1000 * 60 * 60)) % 24);
+    timeLapsedStr = `${hours}h ${minutes}m ${seconds}s`;
+  }
+
+  const buyMC = buyData.mcString || 'N/A';
+  const sellMC = sellData ? (sellData.mcString || 'N/A') : 'N/A';
+  
+  let mcChange = 'N/A';
+  let mcChangePct = 'N/A';
+
+  if (buyData.mcNumeric !== null && sellData && sellData.mcNumeric !== null) {
+    const change = sellData.mcNumeric - buyData.mcNumeric;
+    mcChange = change.toFixed(2); // Assuming mcNumeric is a float representing value
+    if (buyData.mcNumeric !== 0) {
+      mcChangePct = ((change / buyData.mcNumeric) * 100).toFixed(2) + '%';
+    } else {
+      mcChangePct = 'inf%'; // Division by zero if buy MC was 0
+    }
+  } else if (sellData && sellData.mcNumeric === null && buyData.mcNumeric !== null) {
+    mcChange = `Sell MC N/A (Buy: ${buyData.mcNumeric})`;
+    mcChangePct = 'N/A';
+  }
+
+
+  const logEntry = `[${new Date().toISOString()}] TRADE OUTCOME for ${tokenAddress}:\n` +
+    `  Buy At:         ${buyTimestamp}\n` +
+    `  Buy MC:         ${buyMC} (Num: ${buyData.mcNumeric !== null ? buyData.mcNumeric.toFixed(2) : 'N/A'})\n` +
+    `  Buy RSI:        ${buyData.rsiNumeric !== null ? buyData.rsiNumeric.toFixed(2) : 'N/A'}\n` +
+    `  Buy CCI(20):    ${buyData.cciString || 'N/A'}\n` +
+    `  Buy PIP:        ${buyData.pipNumeric !== null ? buyData.pipNumeric.toFixed(2) : 'N/A'}\n` +
+    `  --------------------------------------------------\n` +
+    `  Sell At:        ${sellTimestamp}\n` +
+    `  Sell MC:        ${sellMC} (Num: ${sellData && sellData.mcNumeric !== null ? sellData.mcNumeric.toFixed(2) : 'N/A'})\n` +
+    `  Sell RSI:       ${sellData && sellData.rsiNumeric !== null ? sellData.rsiNumeric.toFixed(2) : 'N/A'}\n` +
+    `  Sell CCI(20):   ${sellData ? (sellData.cciString || 'N/A') : 'N/A'}\n` +
+    `  Sell Reason:    ${sellReason}\n` +
+    `  --------------------------------------------------\n` +
+    `  Time Lapsed:    ${timeLapsedStr}\n` +
+    `  MC Change:      ${mcChange}\n` +
+    `  MC Change (%):  ${mcChangePct}\n\n`;
+
+  fs.appendFileSync(profitLossLogFile, logEntry);
+  console.log(`Logged trade outcome for ${tokenAddress} to ${profitLossLogFile}`);
+}

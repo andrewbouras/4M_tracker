@@ -1,3 +1,6 @@
-2025/05/11-14:53:28.961 283ac Reusing MANIFEST /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/shared_proto_db/MANIFEST-000001
-2025/05/11-14:53:28.961 283ac Recovering log #3
-2025/05/11-14:53:28.963 283ac Reusing old log /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/shared_proto_db/000003.log 
+2025/05/13-15:07:19.927 1af13 Reusing MANIFEST /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/shared_proto_db/MANIFEST-000001
+2025/05/13-15:07:19.928 1af13 Recovering log #3
+2025/05/13-15:07:19.932 1af13 Reusing old log /Volumes/EXTERNAL SSD/3. Crypto/andrewlocalmain/verbose-computing-machine/puppeteer_profile/Default/shared_proto_db/000003.log 
+2025/05/13-15:07:50.487 1af11 Level-0 table #5: started
+2025/05/13-15:07:50.503 1af11 Level-0 table #5: 75205 bytes OK
+2025/05/13-15:07:50.513 1af11 Delete type=0 #3
